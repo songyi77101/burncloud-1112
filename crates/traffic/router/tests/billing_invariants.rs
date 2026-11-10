@@ -1,4 +1,10 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_types)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_types,
+    clippy::panic_in_result_fn,
+    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
+)]
 
 mod common;
 
@@ -10,7 +16,7 @@ mod local_attachment_contract;
 mod node_existing_router_integration;
 
 use burncloud_database::sqlx;
-use burncloud_database_router::{RouterDatabase, RouterLog, RouterTokenModel};
+use burncloud_router::{RouterDatabase, RouterLog, RouterTokenModel};
 use common::{insert_router_token, setup_db};
 
 fn test_log(user_id: &str) -> RouterLog {

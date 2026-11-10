@@ -8,7 +8,8 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    reason = "integration-test code: panicking on fixture failures is the intended signal, and fixtures use plain Value formatting and patterns"
 )]
 //! Aliyun ECS API Client
 //!
@@ -122,7 +123,7 @@ pub struct AliyunECS {
 
 impl AliyunECS {
     pub fn new(config: AliyunConfig) -> Self {
-        let endpoint = format!("ecs.{}.aliyuncs.com", &config.region_id);
+        let endpoint = format!("ecs.{}.aliyuncs.com", config.region_id);
         Self {
             config,
             client: Client::new(),
@@ -478,7 +479,7 @@ struct NetworkResources {
 
 // Simple URL encoding module
 mod urlencoding {
-    pub fn encode(s: &str) -> String {
+    pub(super) fn encode(s: &str) -> String {
         let mut encoded = String::new();
         for c in s.chars() {
             match c {

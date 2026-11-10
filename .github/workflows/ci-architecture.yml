@@ -1,0 +1,50 @@
+name: CI / Architecture
+
+# MANUAL ONLY.
+#
+# Architecture-specific checks that are not ordinary PR quality gates:
+#   - burncloud-code's own regression suite on Linux and Windows
+#   - the router service dependency whitelist
+#
+# Generic formatting, workspace tests, Clippy and cargo-deny live in the PR/release gates instead.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  code-regression:
+    name: burncloud-code regression (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test initialization, affected-package selection and commit gates
+        run: cargo test -p burncloud-code
+
+  router-deps:
+    name: Router dependency whitelist
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Check router service dependency whitelist
+        run: ./crates/traffic/router/scripts/check-router-deps.sh --ci

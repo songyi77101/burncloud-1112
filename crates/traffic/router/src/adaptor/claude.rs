@@ -1,14 +1,17 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(clippy::disallowed_types)]
+#![allow(
+    clippy::disallowed_types,
+    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
+)]
 
 use super::{current_unix_timestamp, generate_chat_id};
-use burncloud_common::types::OpenAIChatRequest;
+use burncloud_traffic_contracts::OpenAIChatRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 // Claude Specific Types
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ClaudeRequest {
+pub(crate) struct ClaudeRequest {
     pub model: String,
     pub messages: Vec<ClaudeMessage>,
     pub max_tokens: u32,
@@ -19,15 +22,15 @@ pub struct ClaudeRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ClaudeMessage {
+pub(crate) struct ClaudeMessage {
     pub role: String,
     pub content: String,
 }
 
-pub struct ClaudeAdaptor;
+pub(crate) struct ClaudeAdaptor;
 
 impl ClaudeAdaptor {
-    pub fn convert_request(req: OpenAIChatRequest) -> Value {
+    pub(crate) fn convert_request(req: OpenAIChatRequest) -> Value {
         let mut system_prompt = None;
         let mut claude_messages = Vec::new();
 
@@ -54,7 +57,7 @@ impl ClaudeAdaptor {
         json!(claude_req)
     }
 
-    pub fn convert_response(claude_resp: Value, model: &str) -> Value {
+    pub(crate) fn convert_response(claude_resp: Value, model: &str) -> Value {
         // Claude Response: { "content": [ { "text": "..." } ], ... }
         let text = claude_resp
             .get("content")
@@ -89,11 +92,12 @@ impl ClaudeAdaptor {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    reason = "test module: fail-fast assertions on router fixtures"
 )]
 mod tests {
     use super::*;
-    use burncloud_common::types::{OpenAIChatMessage, OpenAIChatRequest};
+    use burncloud_traffic_contracts::{OpenAIChatMessage, OpenAIChatRequest};
     use serde_json::json;
 
     #[test]
@@ -104,10 +108,12 @@ mod tests {
                 OpenAIChatMessage {
                     role: "system".to_string(),
                     content: "Be helpful".to_string(),
+                    extra: Default::default(),
                 },
                 OpenAIChatMessage {
                     role: "user".to_string(),
                     content: "Hi".to_string(),
+                    extra: Default::default(),
                 },
             ],
             temperature: Some(0.5),
