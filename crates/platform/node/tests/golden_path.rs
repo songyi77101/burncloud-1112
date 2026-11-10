@@ -1,10 +1,19 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "This is an end-to-end test of the node lifecycle: every step is a precondition for the \
+              next, so a failing step must abort the test at that point rather than be ignored. \
+              `unwrap` is the assertion mechanism here, and the same allowance is used by the other \
+              integration tests in this workspace. Only two sites are `Result` unwraps that the lint \
+              reports; the rest are `Option` unwraps, which the lint does not flag."
+)]
+
 use burncloud_node_runtime::{
-    ArtifactPreparer, ArtifactRequest, FakeArtifactPreparer, FakeHardwareProbe, FakeHealthProbe,
-    FakeProcessManager, FakeReadinessProbe, FakeRuntimePreparer, HardwareProbe, HealthProbe,
-    NodeComposition, NodeState, ProcessManager, ProcessSpec, ReadinessProbe, ReadinessTarget,
-    ReconcileAction, ReconcileEvidence, RuntimePreparer, RuntimeRequest,
+    ArtifactPreparer, ArtifactRequest, ArtifactSource, FakeArtifactPreparer, FakeHardwareProbe,
+    FakeHealthProbe, FakeProcessManager, FakeReadinessProbe, FakeRuntimePreparer, HardwareProbe,
+    HealthProbe, NodeComposition, NodeState, ProcessManager, ProcessSpec, ReadinessProbe,
+    ReadinessTarget, ReconcileAction, ReconcileEvidence, RuntimePreparer, RuntimeRequest,
 };
-use burncloud_service_models::{
+use burncloud_supply_model::{
     FakeModelResolver, ModelResolutionOutcome, ModelResolutionRequest, ModelResolver,
 };
 
@@ -27,7 +36,7 @@ fn fake_node(pid: u32) -> FakeNode {
     )
 }
 
-async fn resolve_local(node: &FakeNode) -> burncloud_service_models::ResolvedModel {
+async fn resolve_local(node: &FakeNode) -> burncloud_supply_model::ResolvedModel {
     let hardware = node.hardware().inspect().await.unwrap();
     let accelerator_memory_bytes = hardware
         .accelerators
@@ -69,10 +78,15 @@ async fn fake_golden_path_converges_from_absent_to_routable() {
     );
     let artifact = node
         .artifacts()
-        .prepare(ArtifactRequest {
-            source: resolved.artifact_source,
-            expected_digest: resolved.artifact_digest,
-        })
+        .prepare(ArtifactRequest::new(
+            ArtifactSource::parse(resolved.artifact_source).unwrap(),
+            resolved
+                .artifact_digest
+                .as_deref()
+                .map(burncloud_node_runtime::Digest::parse)
+                .transpose()
+                .unwrap(),
+        ))
         .await
         .unwrap();
     node.reconciler_mut()
@@ -103,7 +117,7 @@ async fn fake_golden_path_converges_from_absent_to_routable() {
         .processes()
         .start(ProcessSpec {
             program: runtime.executable,
-            args: vec![artifact.local_path],
+            args: vec![artifact.local_path().to_string_lossy().into_owned()],
         })
         .await
         .unwrap();
@@ -140,10 +154,15 @@ async fn fake_golden_path_cannot_serve_before_router_attachment_evidence() {
         .unwrap();
     let artifact = node
         .artifacts()
-        .prepare(ArtifactRequest {
-            source: resolved.artifact_source,
-            expected_digest: resolved.artifact_digest,
-        })
+        .prepare(ArtifactRequest::new(
+            ArtifactSource::parse(resolved.artifact_source).unwrap(),
+            resolved
+                .artifact_digest
+                .as_deref()
+                .map(burncloud_node_runtime::Digest::parse)
+                .transpose()
+                .unwrap(),
+        ))
         .await
         .unwrap();
     node.reconciler_mut()
@@ -165,7 +184,7 @@ async fn fake_golden_path_cannot_serve_before_router_attachment_evidence() {
         .processes()
         .start(ProcessSpec {
             program: runtime.executable,
-            args: vec![artifact.local_path],
+            args: vec![artifact.local_path().to_string_lossy().into_owned()],
         })
         .await
         .unwrap();

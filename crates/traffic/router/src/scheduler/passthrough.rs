@@ -5,14 +5,14 @@
 
 use std::collections::HashMap;
 
-use burncloud_common::types::Channel;
+use burncloud_supply_contracts::Channel;
 
 use super::{ChannelScheduler, ScheduleError, SchedulingContext};
 
 /// Passthrough scheduler — uses admin-configured weights only.
 ///
 /// Test-only. Production code uses `rank_passthrough` directly.
-pub struct PassthroughScheduler;
+pub(crate) struct PassthroughScheduler;
 
 impl ChannelScheduler for PassthroughScheduler {
     fn name(&self) -> &'static str {
@@ -31,7 +31,10 @@ impl ChannelScheduler for PassthroughScheduler {
     }
 }
 
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test module: fail-fast assertions on scheduler fixtures"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

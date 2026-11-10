@@ -1,5 +1,8 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(clippy::disallowed_types)]
+#![allow(
+    clippy::disallowed_types,
+    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
+)]
 
 //! Dynamic Protocol Adaptor Module
 //!
@@ -9,13 +12,16 @@
 use crate::adaptor::mapping::{apply_mapping, extract_value, RequestMapping, ResponseMapping};
 use crate::adaptor::{factory::ChannelAdaptor, generate_chat_id};
 use async_trait::async_trait;
-use burncloud_common::types::OpenAIChatRequest;
+use burncloud_traffic_contracts::OpenAIChatRequest;
 use reqwest::RequestBuilder;
 use serde_json::Value;
 
 /// Dynamic adaptor that uses protocol configuration at runtime
-#[allow(dead_code)]
-pub struct DynamicAdaptor {
+#[allow(
+    dead_code,
+    reason = "fields are read only by protocol-config code paths that are not all wired yet"
+)]
+pub(crate) struct DynamicAdaptor {
     /// Channel type identifier
     pub channel_type: i32,
     /// API version string
@@ -30,10 +36,13 @@ pub struct DynamicAdaptor {
     response_mapping: Option<ResponseMapping>,
 }
 
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "constructed by the adaptor factory from protocol config, not yet referenced by every caller"
+)]
 impl DynamicAdaptor {
     /// Create a new dynamic adaptor with the given configuration
-    pub fn new(
+    pub(crate) fn new(
         channel_type: i32,
         api_version: String,
         chat_endpoint: Option<String>,
@@ -52,7 +61,7 @@ impl DynamicAdaptor {
     }
 
     /// Build endpoint URL with placeholder substitution
-    pub fn build_endpoint(&self, base_url: &str, model: &str) -> String {
+    pub(crate) fn build_endpoint(&self, base_url: &str, model: &str) -> String {
         let endpoint = self
             .chat_endpoint
             .as_deref()
@@ -67,12 +76,12 @@ impl DynamicAdaptor {
     }
 
     /// Parse request mapping from JSON string
-    pub fn parse_request_mapping(json: &str) -> Option<RequestMapping> {
+    pub(crate) fn parse_request_mapping(json: &str) -> Option<RequestMapping> {
         serde_json::from_str(json).ok()
     }
 
     /// Parse response mapping from JSON string
-    pub fn parse_response_mapping(json: &str) -> Option<ResponseMapping> {
+    pub(crate) fn parse_response_mapping(json: &str) -> Option<ResponseMapping> {
         serde_json::from_str(json).ok()
     }
 }
@@ -181,7 +190,8 @@ impl ChannelAdaptor for DynamicAdaptor {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    reason = "test module: fail-fast assertions on router fixtures"
 )]
 mod tests {
     use super::*;
@@ -266,9 +276,10 @@ mod tests {
 
         let req = OpenAIChatRequest {
             model: "gpt-4".to_string(),
-            messages: vec![burncloud_common::types::OpenAIChatMessage {
+            messages: vec![burncloud_traffic_contracts::OpenAIChatMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                extra: Default::default(),
             }],
             temperature: Some(0.7),
             max_tokens: Some(100),
@@ -294,9 +305,10 @@ mod tests {
 
         let req = OpenAIChatRequest {
             model: "gpt-4".to_string(),
-            messages: vec![burncloud_common::types::OpenAIChatMessage {
+            messages: vec![burncloud_traffic_contracts::OpenAIChatMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                extra: Default::default(),
             }],
             temperature: None,
             max_tokens: None,

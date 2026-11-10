@@ -1,0 +1,521 @@
+//! # BurnCloud Supply Channel
+//!
+//! Supply-owned implementation for upstream Channel management. This crate is the
+//! vertical owner for Channel use cases and persistence; it replaces the historical
+//! `database-channel` + `service-channel` technical split without changing behavior.
+//!
+//! ## Domain-crate contract (the 10 questions)
+//!
+//! 1. **Owner** — Supply. Business capability: Channel / upstream provider management.
+//! 2. **Responsibility** — create, read, update, delete and synchronize Channel providers,
+//!    abilities and protocol configurations. It must not own Traffic scheduling, Billing,
+//!    Auth/Token, HTTP presentation or Node lifecycle behavior.
+//! 3. **Data Truth** — `channel_providers`, `channel_abilities` and
+//!    `channel_protocol_configs`. Schema and historical migrations are not owned by this
+//!    migration and must not be rewritten here.
+//! 4. **Public contract** — cross-domain value objects live in
+//!    `burncloud-supply-contracts`; [`ChannelService`] is the preferred Channel use-case
+//!    facade. `ChannelProviderModel`, `ChannelAbilityModel` and
+//!    `ChannelProtocolConfigModel` remain public only as compatibility surfaces for
+//!    existing consumers and must not be treated as the preferred boundary for new code.
+//! 5. **Allowed dependencies** — Supply contracts, platform database infrastructure and
+//!    implementation libraries (`sqlx`, `tokio`, serde/tracing). This crate must not depend
+//!    on Commerce, Traffic, Identity or interface implementation crates.
+//! 6. **Allowed consumers** — interfaces may call [`ChannelService`]; other domains should
+//!    depend on `burncloud-supply-contracts` for values and require architecture review
+//!    before depending on this implementation crate. Existing Router/Inference consumers
+//!    are migration debt, not precedent.
+//! 7. **Internal structure** — SQL and row mapping stay inside this crate; `rows` and
+//!    helper modules remain private. Do not create empty service/repository/factory layers
+//!    merely to imitate a diagram.
+//! 8. **Errors / logs / security** — database failures propagate as `DatabaseError`;
+//!    callers decide presentation. SQL values are bound rather than interpolated. Channel
+//!    credentials are data, not log fields: do not log API keys or secrets.
+//! 9. **Proof** — SQLite integration suites pin row mapping, CRUD, ability synchronization
+//!    and protocol config behavior; the PostgreSQL dialect contract exercises backend-only
+//!    SQL; repository acceptance is `cargo run -- code test --all`. The unit migration
+//!    invariants below additionally prove the merged [`ChannelService`] preserves automatic
+//!    ability synchronization without tests manually repairing it.
+//! 10. **Correct / incorrect calls** — correct cross-domain type usage goes through
+//!     `burncloud-supply-contracts`; Channel use cases go through [`ChannelService`]. New
+//!     Traffic/Commerce/Identity code must not issue SQL against Channel tables or add a
+//!     fresh dependency on `Channel*Model` just because those compatibility symbols remain
+//!     public during migration.
+//!
+//! ```text
+//! Correct:   Interface -> ChannelService -> Supply-owned persistence -> platform Database
+//! Correct:   Other domain -> burncloud-supply-contracts (when only Channel values are needed)
+//! Incorrect: Traffic -> SELECT/UPDATE channel_providers or channel_abilities directly
+//! Incorrect: New domain code -> ChannelProviderModel solely to bypass the use-case boundary
+//! ```
+
+mod channel_ability;
+mod channel_protocol_config;
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "channel ability synchronization intentionally reconciles create/update/delete cases in one legacy routine; contract tests cover its behavior while decomposition remains maintainability work"
+)]
+mod channel_provider;
+mod common;
+mod rows;
+
+use burncloud_database::Database;
+
+pub use burncloud_database::DatabaseError;
+pub use burncloud_supply_contracts::{Ability, Channel, ChannelAbility, ChannelProvider};
+pub use channel_ability::{ChannelAbilityInput, ChannelAbilityModel};
+pub use channel_protocol_config::{
+    ChannelProtocolConfig, ChannelProtocolConfigInput, ChannelProtocolConfigModel,
+};
+pub use channel_provider::{ChannelProviderModel, ChannelRateCap};
+
+type Result<T> = std::result::Result<T, DatabaseError>;
+
+/// Supply 拥有的上游供给用例入口。
+///
+/// 既有方法保持原行为；带归属条件的隔离／删除通过同一事务核对标签、修改能力和供给，
+/// 其提交与未知错误边界见各方法文档。其他领域不得绕过本入口写入供给表。
+pub struct ChannelService;
+
+impl ChannelService {
+    /// 按精确归属标签原子隔离供给及其能力。
+    ///
+    /// # 注意
+    /// id 必须为正数，expected_tag 不得为空。归属不符返回 InvalidData；
+    /// 仅事务内确认不存在时返回 false。true 表示提交成功；数据库错误（包括
+    /// 提交结果不确定）不会转换为不存在，不会自动重试。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(db: &burncloud_database::Database) -> Result<(), burncloud_database::DatabaseError> {
+    /// let changed = burncloud_supply_channel::ChannelService::quarantine_if_tag(
+    ///     db, 42, "burncloud-node-local",
+    /// ).await?;
+    /// # let _changed = changed;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn quarantine_if_tag(db: &Database, id: i32, expected_tag: &str) -> Result<bool> {
+        if id <= 0 || expected_tag.is_empty() {
+            return Err(DatabaseError::InvalidData {
+                message: "channel id must be positive and expected tag must not be empty".into(),
+            });
+        }
+        channel_provider::quarantine_if_tag(db, id, expected_tag).await
+    }
+
+    /// 按精确归属标签原子删除供给及其能力。
+    ///
+    /// # 注意
+    /// id 必须为正数，expected_tag 不得为空。归属不符返回 InvalidData；
+    /// 仅事务内确认不存在时返回 false。true 表示提交成功；数据库错误（包括
+    /// 提交结果不确定）不会转换为不存在，不会自动重试。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(db: &burncloud_database::Database) -> Result<(), burncloud_database::DatabaseError> {
+    /// let changed = burncloud_supply_channel::ChannelService::delete_if_tag(
+    ///     db, 42, "burncloud-node-local",
+    /// ).await?;
+    /// # let _changed = changed;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_if_tag(db: &Database, id: i32, expected_tag: &str) -> Result<bool> {
+        if id <= 0 || expected_tag.is_empty() {
+            return Err(DatabaseError::InvalidData {
+                message: "channel id must be positive and expected tag must not be empty".into(),
+            });
+        }
+        channel_provider::delete_if_tag(db, id, expected_tag).await
+    }
+
+    /// List channels with pagination.
+    pub async fn list(db: &Database, limit: i32, offset: i32) -> Result<Vec<Channel>> {
+        ChannelProviderModel::list(db, limit, offset).await
+    }
+
+    /// Create a new channel. Sets `channel.id` to the newly assigned ID.
+    ///
+    /// Abilities are derived from the channel's own `models` / `group` / `priority` / `weight`
+    /// inside the same transaction, so a created channel is routable without a second call.
+    pub async fn create(db: &Database, channel: &mut Channel) -> Result<i32> {
+        ChannelProviderModel::create(db, channel).await
+    }
+
+    /// Create abilities for a channel through the Supply-owned persistence boundary.
+    ///
+    /// This exists for callers that declare a channel's ability explicitly instead of relying on
+    /// the derivation performed by [`Self::create`]. It is idempotent: the underlying write is
+    /// `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` on `(group, model, channel_id)`, so an
+    /// ability that [`Self::create`] already derived is reported as `0` inserted rows rather than
+    /// duplicated or overwritten.
+    pub async fn create_abilities(
+        db: &Database,
+        abilities: &[ChannelAbilityInput],
+    ) -> Result<usize> {
+        ChannelAbilityModel::create_batch(db, abilities).await
+    }
+
+    /// Update an existing channel.
+    pub async fn update(db: &Database, channel: &Channel) -> Result<()> {
+        ChannelProviderModel::update(db, channel).await
+    }
+
+    /// Delete a channel by ID.
+    pub async fn delete(db: &Database, id: i32) -> Result<()> {
+        ChannelProviderModel::delete(db, id).await
+    }
+
+    /// Get a channel by ID.
+    pub async fn get_by_id(db: &Database, id: i32) -> Result<Option<Channel>> {
+        ChannelProviderModel::get_by_id(db, id).await
+    }
+
+    /// List the narrow provider rate-cap projection used by Traffic's L2 shaper.
+    pub async fn list_rate_caps(db: &Database) -> Result<Vec<ChannelRateCap>> {
+        ChannelProviderModel::list_rate_caps(db).await
+    }
+
+    /// List channels by ids through the Supply-owned persistence boundary.
+    pub async fn list_by_ids(db: &Database, ids: &[i32]) -> Result<Vec<Channel>> {
+        ChannelProviderModel::list_by_ids(db, ids).await
+    }
+
+    /// Update only one channel's API version.
+    pub async fn update_api_version(db: &Database, id: i32, api_version: &str) -> Result<()> {
+        ChannelProviderModel::update_api_version(db, id, api_version).await
+    }
+
+    /// Atomically remove a channel's abilities and mark it quarantined (status 3).
+    pub async fn quarantine(db: &Database, id: i32) -> Result<bool> {
+        ChannelProviderModel::quarantine(db, id).await
+    }
+
+    /// 查询组与模型的全部已启用能力，保留各自的管理员优先级和权重。
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # async fn example(db: &burncloud_database::Database) -> Result<(), burncloud_database::DatabaseError> {
+    /// let abilities = burncloud_supply_channel::ChannelService::list_enabled_for_model(db, "default", "qwen:4b").await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Notes
+    /// 组和模型必须非空；不裁剪模型别名，不套用本机模型长度限制。无匹配返回空列表，数据库错误原样传播。
+    pub async fn list_enabled_for_model(
+        db: &Database,
+        group: &str,
+        model: &str,
+    ) -> Result<Vec<Ability>> {
+        if group.is_empty() || model.is_empty() {
+            return Err(burncloud_database::DatabaseError::InvalidData {
+                message: "group and model must not be empty".into(),
+            });
+        }
+        ChannelAbilityModel::list_enabled_for_model(db, group, model).await
+    }
+
+    /// Return enabled abilities at the highest priority for one group/model pair.
+    pub async fn list_enabled_at_highest_priority(
+        db: &Database,
+        group: &str,
+        model: &str,
+    ) -> Result<Vec<Ability>> {
+        ChannelAbilityModel::list_enabled_at_highest_priority(db, group, model).await
+    }
+
+    /// List all model names with at least one enabled ability.
+    pub async fn list_distinct_models(db: &Database) -> Result<Vec<String>> {
+        ChannelAbilityModel::list_distinct_models(db).await
+    }
+
+    /// Synchronize model abilities for a channel.
+    pub async fn sync_abilities(db: &Database, channel: &Channel) -> Result<()> {
+        ChannelProviderModel::sync_abilities(db, channel).await
+    }
+}
+
+#[cfg(test)]
+mod migration_invariants {
+    use super::{ChannelAbilityModel, ChannelService};
+    use burncloud_database::{create_database_with_url, Database};
+    use burncloud_supply_contracts::{Channel, ChannelType};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(0);
+
+    fn verify(condition: bool, message: &'static str) -> TestResult<()> {
+        if condition {
+            Ok(())
+        } else {
+            Err(Box::new(std::io::Error::other(message)))
+        }
+    }
+
+    fn sample_channel(name: &str, models: &str, group: &str, status: i32) -> Channel {
+        Channel {
+            id: 0,
+            type_: ChannelType::OpenAI as i32,
+            key: "sk-migration-invariant".to_owned(),
+            status,
+            name: name.to_owned(),
+            weight: 10,
+            created_time: None,
+            test_time: None,
+            response_time: None,
+            base_url: Some("https://upstream.invalid".to_owned()),
+            models: models.to_owned(),
+            group: group.to_owned(),
+            used_quota: 0,
+            model_mapping: None,
+            priority: 7,
+            auto_ban: 1,
+            other_info: None,
+            tag: None,
+            setting: None,
+            param_override: None,
+            header_override: None,
+            remark: None,
+            api_version: Some("default".to_owned()),
+            pricing_region: None,
+            rpm_cap: None,
+            tpm_cap: None,
+            reservation_green: None,
+            reservation_yellow: None,
+            reservation_red: None,
+        }
+    }
+
+    async fn fresh_db(tag: &str) -> TestResult<(Database, PathBuf)> {
+        let serial = NEXT_DB.fetch_add(1, Ordering::SeqCst);
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "bc_supply_channel_{tag}_{}_{}_{}.db",
+            std::process::id(),
+            serial,
+            nanos
+        ));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Box::new(error)),
+        }
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        let url = format!("sqlite:///{}?mode=rwc", normalized);
+        let db = create_database_with_url(&url).await?;
+        Ok((db, path))
+    }
+
+    async fn cleanup(db: Database, path: &Path) -> TestResult<()> {
+        db.close().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for suffix in ["", "-wal", "-shm"] {
+            let mut candidate = path.as_os_str().to_os_string();
+            candidate.push(suffix);
+            let candidate = PathBuf::from(candidate);
+            match std::fs::remove_file(&candidate) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(Box::new(error)),
+            }
+        }
+        Ok(())
+    }
+
+    /// The service facade must preserve the production invariant that create/update themselves
+    /// synchronize abilities. The test deliberately never calls `sync_abilities` directly.
+    #[tokio::test]
+    async fn service_lifecycle_keeps_abilities_synchronized_without_manual_sync() -> TestResult<()>
+    {
+        let (db, path) = fresh_db("service_lifecycle").await?;
+        let mut channel = sample_channel("service", "m1,m2", "default", 1);
+
+        let id = ChannelService::create(&db, &mut channel).await?;
+        verify(id > 0, "create must assign a positive channel id")?;
+        verify(
+            channel.id == id,
+            "create must write the assigned id back to the channel",
+        )?;
+
+        let created_abilities = ChannelAbilityModel::list_by_channel(&db, id).await?;
+        verify(
+            created_abilities.len() == 2,
+            "create must synchronize abilities itself",
+        )?;
+
+        channel.models = "m2,m3".to_owned();
+        channel.group = "premium".to_owned();
+        channel.status = 0;
+        ChannelService::update(&db, &channel).await?;
+        let disabled_abilities = ChannelAbilityModel::list_by_channel(&db, id).await?;
+        verify(
+            disabled_abilities.is_empty(),
+            "disabling through update must remove abilities without a second sync call",
+        )?;
+
+        channel.status = 1;
+        ChannelService::update(&db, &channel).await?;
+        let reenabled = ChannelAbilityModel::list_by_channel(&db, id).await?;
+        verify(
+            reenabled.len() == 2,
+            "re-enabling through update must restore both abilities",
+        )?;
+        let all_premium = reenabled.iter().all(|ability| ability.group == "premium");
+        verify(
+            all_premium,
+            "re-enabled abilities must use the updated premium group",
+        )?;
+        let mut models: Vec<_> = reenabled
+            .iter()
+            .map(|ability| ability.model.as_str())
+            .collect();
+        models.sort_unstable();
+        verify(
+            models == vec!["m2", "m3"],
+            "re-enabled abilities must reflect the updated model list",
+        )?;
+
+        let fetched = ChannelService::get_by_id(&db, id).await?;
+        verify(
+            fetched.as_ref().map(|item| item.name.as_str()) == Some("service"),
+            "get_by_id must return the created channel",
+        )?;
+        let listed = ChannelService::list(&db, 100, 0).await?;
+        verify(
+            listed.iter().any(|item| item.id == id),
+            "list must include the created channel",
+        )?;
+
+        ChannelService::delete(&db, id).await?;
+        verify(
+            ChannelService::get_by_id(&db, id).await?.is_none(),
+            "delete must remove the channel",
+        )?;
+        let remaining_abilities = ChannelAbilityModel::list_by_channel(&db, id).await?;
+        verify(
+            remaining_abilities.is_empty(),
+            "delete must remove the channel abilities",
+        )?;
+
+        cleanup(db, &path).await
+    }
+
+    /// Traffic-facing Channel capabilities must remain Supply-owned without changing routing data.
+    #[tokio::test]
+    async fn owner_boundary_preserves_candidate_update_and_quarantine_behavior() -> TestResult<()> {
+        let (db, path) = fresh_db("owner_boundary").await?;
+
+        let mut low = sample_channel("low", "shared-model", "routing", 1);
+        low.priority = 1;
+        low.weight = 2;
+        let low_id = ChannelService::create(&db, &mut low).await?;
+
+        let mut high_a = sample_channel("high-a", "shared-model", "routing", 1);
+        high_a.priority = 9;
+        high_a.weight = 4;
+        high_a.rpm_cap = Some(120);
+        high_a.tpm_cap = Some(50_000);
+        high_a.reservation_green = Some(0.5);
+        high_a.reservation_yellow = Some(0.3);
+        high_a.reservation_red = Some(0.2);
+        let high_a_id = ChannelService::create(&db, &mut high_a).await?;
+
+        let mut high_b = sample_channel("high-b", "shared-model", "routing", 1);
+        high_b.priority = 9;
+        high_b.weight = 7;
+        let high_b_id = ChannelService::create(&db, &mut high_b).await?;
+
+        let mut candidates =
+            ChannelService::list_enabled_at_highest_priority(&db, "routing", "shared-model")
+                .await?;
+        candidates.sort_unstable_by_key(|ability| ability.channel_id);
+        let mut expected = vec![(high_a_id, 4), (high_b_id, 7)];
+        expected.sort_unstable_by_key(|(id, _)| *id);
+        let actual: Vec<_> = candidates
+            .iter()
+            .map(|ability| (ability.channel_id, ability.weight))
+            .collect();
+        verify(
+            actual == expected,
+            "candidate query must keep only enabled abilities at the highest priority with weights",
+        )?;
+        verify(
+            candidates
+                .iter()
+                .all(|ability| ability.channel_id != low_id),
+            "lower-priority abilities must not leak into Traffic candidate selection",
+        )?;
+
+        let rate_caps = ChannelService::list_rate_caps(&db).await?;
+        let high_cap = rate_caps
+            .iter()
+            .find(|row| row.id == high_a_id)
+            .ok_or_else(|| std::io::Error::other("rate-cap projection omitted channel"))?;
+        verify(
+            high_cap.rpm_cap == Some(120)
+                && high_cap.tpm_cap == Some(50_000)
+                && high_cap.reservation_green == Some(0.5)
+                && high_cap.reservation_yellow == Some(0.3)
+                && high_cap.reservation_red == Some(0.2),
+            "rate-cap projection must preserve all shaper fields",
+        )?;
+
+        ChannelService::update_api_version(&db, high_a_id, "2026-10-owner").await?;
+        let updated = ChannelService::get_by_id(&db, high_a_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("updated channel disappeared"))?;
+        verify(
+            updated.api_version.as_deref() == Some("2026-10-owner"),
+            "targeted API-version update must preserve the new version",
+        )?;
+        ChannelService::update_api_version(&db, i32::MAX, "missing-is-noop").await?;
+
+        verify(
+            ChannelService::quarantine(&db, high_a_id).await?,
+            "existing channel quarantine must report success",
+        )?;
+        let quarantined = ChannelService::get_by_id(&db, high_a_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("quarantined channel disappeared"))?;
+        verify(
+            quarantined.status == 3,
+            "quarantine must keep the historical status=3 behavior",
+        )?;
+        verify(
+            ChannelAbilityModel::list_by_channel(&db, high_a_id)
+                .await?
+                .is_empty(),
+            "quarantine must atomically remove routing abilities",
+        )?;
+        verify(
+            !ChannelService::quarantine(&db, i32::MAX).await?,
+            "missing channel quarantine must report false",
+        )?;
+
+        cleanup(db, &path).await
+    }
+
+    /// This migration must not silently change the legacy duplicate-model behavior. Today the
+    /// plain INSERT used by automatic synchronization rejects a repeated model with a uniqueness
+    /// error. A future behavior fix may deliberately change this test in its own issue.
+    #[tokio::test]
+    async fn duplicate_model_behavior_remains_an_error() -> TestResult<()> {
+        let (db, path) = fresh_db("duplicate_model").await?;
+        let mut channel = sample_channel("duplicate", "same,same", "default", 1);
+
+        let result = ChannelService::create(&db, &mut channel).await;
+        verify(
+            result.is_err(),
+            "#744 is a structural migration and must not change the existing duplicate-model failure behavior",
+        )?;
+
+        cleanup(db, &path).await
+    }
+}

@@ -1,0 +1,572 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration-test file: fail-fast setup is the intended behaviour"
+)]
+//! Regression cover for the Identity database layer (S1-D, #610).
+//!
+//! The Identity domain had no test at all before this file. S1-D removes the three legacy
+//! `common` DTOs and asserts that Identity's own account / credential / recharge types are the
+//! single owner, so those types need a floor: a real SQLite database, the real `UserDatabase::init`
+//! schema, the real writers and readers, and field-by-field assertions.
+//!
+//! A file database rather than `:memory:`: the pool opens several connections and an in-memory
+//! SQLite database is per-connection, so the schema and the assertions would see different
+//! databases. On Windows the URL needs the `sqlite:///C:/...` form (see `Database::new`).
+
+use burncloud_database::{create_database_with_url, Database};
+use burncloud_service_user::{
+    BalanceModel, UserAccount, UserApiKeyInput, UserApiKeyModel, UserApiKeyUpdateInput,
+    UserDatabase, UserRecharge,
+};
+
+/// A fresh SQLite file database with the Identity schema applied through the production initializer.
+async fn fresh_db(tag: &str) -> (Database, std::path::PathBuf) {
+    let path = std::env::temp_dir().join(format!(
+        "bc_identity_{}_{}_{}.db",
+        tag,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::remove_file(&path).ok();
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let url = format!("sqlite:///{}?mode=rwc", normalized);
+    let db = create_database_with_url(&url)
+        .await
+        .unwrap_or_else(|e| panic!("open {url}: {e}"));
+    UserDatabase::init(&db)
+        .await
+        .expect("UserDatabase::init must create the user_* schema");
+    // `create_database_with_url` no longer seeds domain default records (#842), and the demo
+    // account is Identity's to write, so seed it through the owner exactly as the application
+    // bootstrap does before asserting on it.
+    UserDatabase::seed_demo_defaults(&db)
+        .await
+        .expect("UserDatabase::seed_demo_defaults must seed the demo account and key");
+    (db, path)
+}
+
+/// Close the pool, wait for the handle to be released, then delete the test database.
+///
+/// Measured on this platform (Windows): dropping a `Database` leaves the file locked and removal
+/// fails with os error 32; `close().await` alone is not enough either, because the pool releases
+/// the handle asynchronously. With a short wait after `close()` the removal succeeds. Before this
+/// was noticed the suite silently leaked one database per test into the temp directory (78 had
+/// accumulated), so the final state is asserted rather than assumed.
+async fn cleanup(db: Database, path: &std::path::Path) {
+    db.close().await.ok();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    std::fs::remove_file(path).unwrap_or_else(|e| {
+        panic!(
+            "test database {} was not removed ({e}); the temp directory would fill up",
+            path.display()
+        )
+    });
+}
+
+fn account(id: &str, username: &str, balance_usd: i64, balance_cny: i64) -> UserAccount {
+    UserAccount {
+        id: id.to_string(),
+        username: username.to_string(),
+        email: Some(format!("{username}@example.com")),
+        password_hash: Some("$2b$12$notarealhash".to_string()),
+        github_id: None,
+        status: 1,
+        balance_usd,
+        balance_cny,
+        preferred_currency: Some("CNY".to_string()),
+    }
+}
+
+#[tokio::test]
+async fn accounts_round_trip_through_the_real_schema() {
+    let (db, path) = fresh_db("accounts").await;
+
+    let user = account("u-1", "alice", 5_000_000_000_i64, 36_200_000_000_i64);
+    UserDatabase::create_user(&db, &user)
+        .await
+        .expect("real INSERT into user_accounts");
+
+    let stored = UserDatabase::get_user_by_id(&db, "u-1")
+        .await
+        .expect("real SELECT from user_accounts")
+        .expect("the account that was just created must be found");
+
+    // Identity fields.
+    assert_eq!(stored.id, "u-1");
+    assert_eq!(stored.username, "alice");
+    assert_eq!(stored.email.as_deref(), Some("alice@example.com"));
+    assert_eq!(stored.status, 1);
+    assert_eq!(stored.preferred_currency.as_deref(), Some("CNY"));
+
+    // Balance fields still round-trip byte-for-byte. S1-D does NOT move their ownership; the
+    // migration of that responsibility is tracked separately (see #610). This assertion pins the
+    // current behaviour so a later change to the writer is a deliberate, visible act.
+    assert_eq!(stored.balance_usd, 5_000_000_000);
+    assert_eq!(stored.balance_cny, 36_200_000_000);
+
+    // Internal password hashing still works, but #612 forbids projection of the stored hash
+    // through the generic Serialize boundary.
+    assert_eq!(stored.password_hash.as_deref(), Some("$2b$12$notarealhash"));
+    let json = serde_json::to_value(&stored).unwrap();
+    assert!(
+        json.get("password_hash").is_none(),
+        "password hash is secret"
+    );
+    assert_eq!(json["username"], serde_json::json!("alice"));
+    // Balance is projected into JSON under the same names (Commerce-facing projection).
+    // `json!` is used rather than naming `serde_json::Value`: the workspace's type gate disallows that
+    // type outside protocol boundaries, and the macro produces the right numeric variant from the
+    // value itself, so the nanodollar amount stays an i64 without an explicit constructor.
+    assert_eq!(json["balance_usd"], serde_json::json!(stored.balance_usd));
+
+    // Lookup paths share the writer's column list.
+    let by_name = UserDatabase::get_user_by_username(&db, "alice")
+        .await
+        .unwrap()
+        .expect("lookup by username");
+    assert_eq!(by_name.id, "u-1");
+    let by_email = UserDatabase::get_user_by_email(&db, "alice@example.com")
+        .await
+        .unwrap()
+        .expect("lookup by email");
+    assert_eq!(by_email.id, "u-1");
+
+    // `UserDatabase::seed_demo_defaults` (this crate's seed for #842) inserts a `demo-user` row with
+    // password hash `no-login` so the console has a placeholder account. `list_users` returns it,
+    // while `count_users`/`has_admin_user` filter it out because it cannot log in. Both behaviours
+    // are asserted so the seed stays visible.
+    let all = UserDatabase::list_users(&db).await.unwrap();
+    assert_eq!(
+        all.len(),
+        2,
+        "the demo-user seed plus the account created here"
+    );
+    assert!(
+        all.iter().any(|u| u.username == "demo-user"),
+        "the seeded placeholder account is present"
+    );
+    let seed = all.iter().find(|u| u.username == "demo-user").unwrap();
+    assert_eq!(
+        seed.password_hash.as_deref(),
+        Some("no-login"),
+        "the seed cannot authenticate"
+    );
+    assert_eq!(
+        UserDatabase::count_users(&db).await.unwrap(),
+        1,
+        "count_users excludes the seed"
+    );
+    // `create_user` only inserts the account row; role assignment is a separate call, so no admin
+    // exists yet. The first-user-is-admin policy lives above this layer.
+    assert!(
+        !UserDatabase::has_admin_user(&db).await.unwrap(),
+        "creating an account does not grant a role"
+    );
+
+    // The role path: assign, then observe.
+    UserDatabase::assign_role(&db, "u-1", "admin")
+        .await
+        .unwrap();
+    let roles = UserDatabase::get_user_roles(&db, "u-1").await.unwrap();
+    assert!(
+        roles.iter().any(|r| r == "admin"),
+        "assign_role must be observable through get_user_roles, got {roles:?}"
+    );
+    assert!(
+        UserDatabase::has_admin_user(&db).await.unwrap(),
+        "an account holding the admin role counts as an admin"
+    );
+
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn balance_writers_are_the_only_mutation_path_and_are_delta_based() {
+    // Records the current ownership of balance mutation: it lives in Identity today and is reached
+    // from the recharge command. The test asserts the *delta* semantics, because a later move to
+    // Commerce must preserve them.
+    let (db, path) = fresh_db("balance").await;
+    UserDatabase::create_user(&db, &account("u-2", "bob", 1_000_000_000, 0))
+        .await
+        .unwrap();
+
+    let after_credit = UserDatabase::update_balance_usd(&db, "u-2", 2_500_000_000)
+        .await
+        .expect("real UPDATE ... SET balance_usd = balance_usd + ?");
+    assert_eq!(after_credit, 3_500_000_000);
+
+    let after_debit = UserDatabase::update_balance_usd(&db, "u-2", -500_000_000)
+        .await
+        .unwrap();
+    assert_eq!(after_debit, 3_000_000_000, "a negative delta debits");
+
+    // The currency selector routes to the matching column.
+    let cny = UserDatabase::update_balance(&db, "u-2", 7_000_000_000, Some("CNY"))
+        .await
+        .unwrap();
+    assert_eq!(cny, 7_000_000_000);
+    let usd_untouched = UserDatabase::get_user_by_id(&db, "u-2")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        usd_untouched.balance_usd, 3_000_000_000,
+        "the CNY write must not touch the USD column"
+    );
+    assert_eq!(usd_untouched.balance_cny, 7_000_000_000);
+
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn recharge_rows_round_trip_and_credit_the_balance() {
+    let (db, path) = fresh_db("recharge").await;
+    UserDatabase::create_user(&db, &account("u-3", "carol", 0, 0))
+        .await
+        .unwrap();
+
+    let recharge = UserRecharge {
+        id: 0,
+        user_id: "u-3".to_string(),
+        amount: 10_000_000_000,
+        currency: Some("USD".to_string()),
+        description: Some("first top-up".to_string()),
+        created_at: None,
+    };
+    let id = UserDatabase::create_recharge(&db, &recharge)
+        .await
+        .expect("real INSERT into user_recharges");
+    assert!(id > 0);
+
+    let listed = UserDatabase::list_recharges(&db, "u-3").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    // The returned value must be *this* row's rowid: a rowid read on another pooled
+    // connection can be 0 (caught above) or a non-zero rowid left by that connection's
+    // earlier insert, which `id > 0` alone would accept (#876).
+    assert_eq!(
+        listed[0].id, id,
+        "the returned rowid must be the inserted row's id"
+    );
+    assert_eq!(listed[0].amount, 10_000_000_000);
+    assert_eq!(listed[0].currency.as_deref(), Some("USD"));
+    assert_eq!(listed[0].description.as_deref(), Some("first top-up"));
+    assert!(
+        listed[0].created_at.is_some(),
+        "created_at is stamped by the schema default"
+    );
+
+    // The recharge writer credits the balance in the same call (current behaviour, recorded here).
+    let credited = UserDatabase::get_user_by_id(&db, "u-3")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        credited.balance_usd, 10_000_000_000,
+        "create_recharge credits balance_usd for a USD recharge"
+    );
+
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn api_keys_round_trip_and_updates_are_partial() {
+    let (db, path) = fresh_db("apikeys").await;
+    UserDatabase::create_user(&db, &account("u-4", "dave", 0, 0))
+        .await
+        .unwrap();
+
+    let created = UserApiKeyModel::create(
+        &db,
+        &UserApiKeyInput {
+            user_id: "u-4".to_string(),
+            name: Some("default".to_string()),
+            remain_quota: Some(1_000_000),
+            unlimited_quota: Some(false),
+            expired_time: Some(-1),
+        },
+    )
+    .await
+    .expect("real INSERT into user_api_keys");
+
+    assert_eq!(created.user_id, "u-4");
+    assert_eq!(created.status, 1);
+    assert!(!created.key.is_empty(), "a key is generated");
+    assert_eq!(created.expired_time, -1, "-1 means never expires");
+
+    let fetched = UserApiKeyModel::get_by_key(&db, &created.key)
+        .await
+        .unwrap()
+        .expect("lookup by key");
+    assert_eq!(fetched.id, created.id);
+    assert_eq!(
+        fetched.key, created.key,
+        "authentication lookup retains the raw key"
+    );
+    assert_eq!(fetched.remain_quota, 1_000_000);
+
+    // A partial update must leave the untouched fields alone.
+    let updated = UserApiKeyModel::update(
+        &db,
+        &created.key,
+        &UserApiKeyUpdateInput {
+            name: Some("renamed".to_string()),
+            remain_quota: None,
+            status: Some(2),
+            expired_time: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(updated, "update reports the row was touched");
+    let after = UserApiKeyModel::get_by_key(&db, &created.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.name.as_deref(), Some("renamed"));
+    assert_eq!(after.status, 2);
+    assert_eq!(
+        after.remain_quota, 1_000_000,
+        "remain_quota was not updated"
+    );
+    assert_eq!(after.expired_time, -1, "expired_time was not updated");
+
+    // #612 allows raw keys only inside trusted storage/authentication paths and the
+    // one-time create display. Ordinary JSON/Debug projection must be masked.
+
+    let listed = UserApiKeyModel::list(&db, 10, 0, Some("u-4"))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].key, created.key,
+        "listing must not mutate stored keys"
+    );
+    let projected = serde_json::to_value(&listed).unwrap();
+    assert_eq!(projected[0]["key"], serde_json::json!(created.masked_key()));
+    assert!(!projected.to_string().contains(&created.key));
+    assert!(UserApiKeyModel::delete(&db, &created.key).await.unwrap());
+    assert!(
+        UserApiKeyModel::get_by_key(&db, &created.key)
+            .await
+            .unwrap()
+            .is_none(),
+        "a deleted key is gone"
+    );
+
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn wallet_single_owner_preserves_both_traffic_debit_variants() {
+    let (db, path) = fresh_db("wallet_single_owner").await;
+    UserDatabase::create_user(
+        &db,
+        &account("wallet-u1", "wallet_a", 10_000_000_000, 20_000_000_000),
+    )
+    .await
+    .expect("create wallet account");
+
+    // Simple debits have identical nanodollar units and guarded SQL updates.
+    assert!(BalanceModel::deduct_usd(&db, "wallet-u1", 1_000_000_000)
+        .await
+        .expect("USD debit"));
+    assert!(BalanceModel::deduct_cny(&db, "wallet-u1", 2_000_000_000)
+        .await
+        .expect("CNY debit"));
+
+    // Service variant: CNY 20B cost consumes 18B CNY + 1B USD at 2 CNY/USD.
+    assert!(BalanceModel::deduct_dual_currency(
+        &db,
+        "wallet-u1",
+        20_000_000_000,
+        "CNY",
+        2_000_000_000,
+    )
+    .await
+    .expect("cross-currency debit"));
+    let after_service = UserDatabase::get_user_by_id(&db, "wallet-u1")
+        .await
+        .expect("read account")
+        .expect("account exists");
+    assert_eq!(after_service.balance_usd, 8_000_000_000);
+    assert_eq!(after_service.balance_cny, 0);
+
+    // Legacy RouterDatabase variant: missing-account positive debit returned
+    // Ok(false), unlike the service variant's explicit not-found error.
+    assert!(
+        BalanceModel::deduct_dual_currency(&db, "wallet-missing", 1, "USD", 2_000_000_000,)
+            .await
+            .is_err()
+    );
+    assert!(!BalanceModel::deduct_dual_currency_router_legacy(
+        &db,
+        "wallet-missing",
+        1,
+        "USD",
+        2_000_000_000,
+    )
+    .await
+    .expect("legacy missing-account semantics"));
+    assert!(!BalanceModel::deduct_usd(&db, "wallet-u1", 9_000_000_000)
+        .await
+        .expect("insufficient USD balance"));
+    assert!(
+        BalanceModel::deduct_dual_currency(&db, "wallet-u1", 0, "USD", 2_000_000_000,)
+            .await
+            .expect("zero charge is unchanged")
+    );
+
+    UserDatabase::create_user(
+        &db,
+        &account("wallet-u2", "wallet_b", 3_000_000_000, 8_000_000_000),
+    )
+    .await
+    .expect("create legacy router wallet");
+    assert!(BalanceModel::deduct_dual_currency_router_legacy(
+        &db,
+        "wallet-u2",
+        5_000_000_000,
+        "USD",
+        2_000_000_000,
+    )
+    .await
+    .expect("legacy USD-first dual currency debit"));
+    let after_router = UserDatabase::get_user_by_id(&db, "wallet-u2")
+        .await
+        .expect("read legacy account")
+        .expect("legacy account exists");
+    assert_eq!(after_router.balance_usd, 0);
+    assert_eq!(after_router.balance_cny, 4_000_000_000);
+
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn wallet_invalid_exchange_rate_fails_closed_and_preserves_funds() {
+    let (db, path) = fresh_db("wallet_invalid_fx").await;
+    UserDatabase::create_user(
+        &db,
+        &account("fx-user", "fx_user", 1_000_000_000, 2_000_000_000),
+    )
+    .await
+    .expect("create wallet");
+
+    // Neither public entry point may panic or commit a partial debit.
+    for rate in [0_i64, -1_i64] {
+        for legacy in [false, true] {
+            let result = if legacy {
+                BalanceModel::deduct_dual_currency_router_legacy(
+                    &db,
+                    "fx-user",
+                    5_000_000_000,
+                    "USD",
+                    rate,
+                )
+                .await
+            } else {
+                BalanceModel::deduct_dual_currency(&db, "fx-user", 5_000_000_000, "USD", rate).await
+            };
+            assert!(result.is_err(), "invalid cross-currency rate must error");
+        }
+    }
+    let still_funded = UserDatabase::get_user_by_id(&db, "fx-user")
+        .await
+        .expect("query account")
+        .expect("account exists");
+    assert_eq!(still_funded.balance_usd, 1_000_000_000);
+    assert_eq!(still_funded.balance_cny, 2_000_000_000);
+
+    // No conversion: a zero rate must not break a valid primary-only debit.
+    assert!(
+        BalanceModel::deduct_dual_currency(&db, "fx-user", 500_000_000, "USD", 0,)
+            .await
+            .expect("primary currency is sufficient")
+    );
+    assert!(
+        BalanceModel::deduct_dual_currency(&db, "fx-user", -1, "CNY", 0,)
+            .await
+            .expect("historical nonpositive cost is a no-op")
+    );
+
+    let after = UserDatabase::get_user_by_id(&db, "fx-user")
+        .await
+        .expect("query account")
+        .expect("account exists");
+    assert_eq!(after.balance_usd, 500_000_000);
+    assert_eq!(after.balance_cny, 2_000_000_000);
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn wallet_large_conversion_cannot_wrap_or_charge_partially() {
+    let (db, path) = fresh_db("wallet_large_fx").await;
+    UserDatabase::create_user(&db, &account("large-fx", "large_fx", 1, 1))
+        .await
+        .expect("create wallet");
+
+    for legacy in [false, true] {
+        let result = if legacy {
+            BalanceModel::deduct_dual_currency_router_legacy(
+                &db,
+                "large-fx",
+                i64::MAX,
+                "USD",
+                i64::MAX,
+            )
+            .await
+        } else {
+            BalanceModel::deduct_dual_currency(&db, "large-fx", i64::MAX, "USD", i64::MAX).await
+        };
+        assert!(!result.expect("large amount must not overflow or truncate"));
+    }
+    let remaining = UserDatabase::get_user_by_id(&db, "large-fx")
+        .await
+        .expect("query account")
+        .expect("account exists");
+    assert_eq!(remaining.balance_usd, 1);
+    assert_eq!(remaining.balance_cny, 1);
+    cleanup(db, &path).await;
+}
+
+#[tokio::test]
+async fn wallet_sqlite_parallel_debits_never_report_partial_success() {
+    let (db, path) = fresh_db("wallet_parallel").await;
+    UserDatabase::create_user(
+        &db,
+        &account("race-sqlite", "race_sqlite", 0, 12_000_000_000),
+    )
+    .await
+    .expect("create wallet");
+
+    let (service, router) = tokio::join!(
+        BalanceModel::deduct_dual_currency(&db, "race-sqlite", 4_000_000_000, "USD", 2_000_000_000,),
+        BalanceModel::deduct_dual_currency_router_legacy(
+            &db,
+            "race-sqlite",
+            4_000_000_000,
+            "USD",
+            2_000_000_000,
+        ),
+    );
+
+    // SQLite may abort a competing deferred reader when it cannot upgrade to
+    // a writer. A database lock error is fail-closed, never a successful debit.
+    let successes =
+        usize::from(matches!(service, Ok(true))) + usize::from(matches!(router, Ok(true)));
+    assert!(successes <= 1, "wallet cannot pay twice from one snapshot");
+    let wallet = UserDatabase::get_user_by_id(&db, "race-sqlite")
+        .await
+        .expect("query wallet")
+        .expect("wallet exists");
+    assert_eq!(wallet.balance_usd, 0);
+    assert_eq!(
+        wallet.balance_cny,
+        12_000_000_000 - (successes as i64 * 8_000_000_000),
+        "balance must account for every successful debit and no failed debit"
+    );
+    cleanup(db, &path).await;
+}

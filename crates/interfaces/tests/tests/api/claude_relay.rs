@@ -8,7 +8,8 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    reason = "integration-test code: panicking on fixture failures is the intended signal, and fixtures use plain Value formatting and patterns"
 )]
 use burncloud_tests::TestClient;
 use dotenvy::dotenv;
@@ -51,7 +52,8 @@ async fn test_claude_adaptor_e2e() {
                         // Demo token usually has 'default' or 'vip'?
                         // In `router/src/lib.rs`, fallback is "default".
                         // Let's use "default" to be safe unless we know demo user group.
-                        // `RouterDatabase::init` inserts demo-user. `UserDatabase::init` creates it.
+                        // The test harness seeds the demo account and demo key through their
+                        // Identity owner (#842), before it builds the app.
                         // Default group for new users is usually "default".
         "group": "default",
         "weight": 10,

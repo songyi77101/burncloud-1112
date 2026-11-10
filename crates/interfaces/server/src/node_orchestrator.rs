@@ -1,11 +1,11 @@
 use burncloud_node_runtime::{
-    ArtifactPreparer, ArtifactRequest, DemandReconciler, HardwareProbe, HealthProbe,
-    NodeComposition, NodeState, PreparedArtifact, PreparedRuntime, ProcessHandle, ProcessManager,
-    ProcessPlan, ReadinessProbe, ReconcileAction, ReconcileEvidence, RuntimeAdapter,
-    RuntimePreparer, RuntimeRequest,
+    ArtifactPreparer, ArtifactRequest, ArtifactSource, DemandReconciler, Digest, HardwareProbe,
+    HealthProbe, NodeComposition, NodeState, PreparedArtifact, PreparedRuntime, ProcessHandle,
+    ProcessManager, ProcessPlan, ReadinessProbe, ReconcileAction, ReconcileEvidence,
+    RuntimeAdapter, RuntimePreparer, RuntimeRequest,
 };
 use burncloud_router::local_attachment::LocalRouteAttachmentId;
-use burncloud_service_models::{
+use burncloud_supply_model::{
     LocalModelUnsupported, ModelResolutionOutcome, ModelResolutionRequest, ModelResolver,
     ResolvedModel,
 };
@@ -342,10 +342,31 @@ where
                     let artifact = match self
                         .machine
                         .artifacts()
-                        .prepare(ArtifactRequest {
-                            source: resolved.artifact_source,
-                            expected_digest: resolved.artifact_digest,
-                        })
+                        .prepare(ArtifactRequest::new(
+                            match ArtifactSource::parse(&resolved.artifact_source) {
+                                Ok(source) => source,
+                                Err(error) => {
+                                    self.mark_failed(&demand.model)?;
+                                    return Err(anyhow::anyhow!(
+                                        "invalid artifact source '{}': {error}",
+                                        resolved.artifact_source
+                                    ));
+                                }
+                            },
+                            match resolved.artifact_digest {
+                                Some(value) => match Digest::parse(&value) {
+                                    Ok(digest) => Some(digest),
+                                    Err(error) => {
+                                        self.mark_failed(&demand.model)?;
+                                        return Err(anyhow::anyhow!(
+                                            "invalid artifact digest '{}': {error}",
+                                            value
+                                        ));
+                                    }
+                                },
+                                None => None,
+                            },
+                        ))
                         .await
                     {
                         Ok(artifact) => artifact,
@@ -354,7 +375,7 @@ where
                             return Err(error.into());
                         }
                     };
-                    if !artifact.verified {
+                    if !artifact.is_verified() {
                         self.mark_failed(&demand.model)?;
                         anyhow::bail!("artifact preparer returned unverified artifact");
                     }
@@ -549,10 +570,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use burncloud_node_runtime::{
-        FakeArtifactPreparer, FakeHardwareProbe, FakeHealthProbe, FakeProcessManager,
-        FakeReadinessProbe, FakeRuntimeAdapter, FakeRuntimePreparer,
+        ArtifactVerificationStatus, FakeArtifactPreparer, FakeHardwareProbe, FakeHealthProbe,
+        FakeProcessManager, FakeReadinessProbe, FakeRuntimeAdapter, FakeRuntimePreparer,
     };
-    use burncloud_service_models::{
+    use burncloud_supply_model::{
         FakeModelResolver, LocalModelUnsupportedReason, ModelResolutionError,
     };
 
@@ -775,7 +796,9 @@ mod tests {
             .resolved = Some(ResolvedModel {
             model: model.into(),
             artifact_source: "qwen/fake.gguf".into(),
-            artifact_digest: Some("sha256:fake".into()),
+            artifact_digest: Some(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            ),
             runtime: "llama.cpp".into(),
             runtime_version: Some("fake-v0".into()),
         });
@@ -811,7 +834,10 @@ mod tests {
             workload.resolved = Some(ResolvedModel {
                 model: model.into(),
                 artifact_source: "qwen/fake.gguf".into(),
-                artifact_digest: Some("sha256:fake".into()),
+                artifact_digest: Some(
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .into(),
+                ),
                 runtime: "llama.cpp".into(),
                 runtime_version: Some("fake-v0".into()),
             });
@@ -823,10 +849,16 @@ mod tests {
             .workloads
             .get_mut(model)
             .expect("workload")
-            .artifact = Some(PreparedArtifact {
-            local_path: "/fake/artifacts/qwen_fake.gguf".into(),
-            verified: true,
-        });
+            .artifact = Some(
+            PreparedArtifact::new(
+                std::env::temp_dir().join("burncloud/fake/artifacts/qwen_fake.gguf"),
+                // The status replaced a bool that meant "verification succeeded". `Verified` is the
+                // faithful translation; `NotRequired` also maps to `is_verified() == true` but would
+                // describe a different scenario, and `Failed` would reverse the fixture.
+                ArtifactVerificationStatus::Verified,
+            )
+            .unwrap(),
+        );
         orchestrator
             .observe(model, ReconcileEvidence::ArtifactPrepared)
             .unwrap();
@@ -861,7 +893,10 @@ mod tests {
             workload.resolved = Some(ResolvedModel {
                 model: model.into(),
                 artifact_source: "qwen/fake.gguf".into(),
-                artifact_digest: Some("sha256:fake".into()),
+                artifact_digest: Some(
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .into(),
+                ),
                 runtime: "llama.cpp".into(),
                 runtime_version: Some("fake-v0".into()),
             });
@@ -873,10 +908,16 @@ mod tests {
             .workloads
             .get_mut(model)
             .expect("workload")
-            .artifact = Some(PreparedArtifact {
-            local_path: "/fake/artifacts/qwen_fake.gguf".into(),
-            verified: true,
-        });
+            .artifact = Some(
+            PreparedArtifact::new(
+                std::env::temp_dir().join("burncloud/fake/artifacts/qwen_fake.gguf"),
+                // The status replaced a bool that meant "verification succeeded". `Verified` is the
+                // faithful translation; `NotRequired` also maps to `is_verified() == true` but would
+                // describe a different scenario, and `Failed` would reverse the fixture.
+                ArtifactVerificationStatus::Verified,
+            )
+            .unwrap(),
+        );
         orchestrator
             .observe(model, ReconcileEvidence::ArtifactPrepared)
             .unwrap();

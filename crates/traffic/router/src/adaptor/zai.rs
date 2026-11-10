@@ -1,5 +1,8 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(clippy::disallowed_types)]
+#![allow(
+    clippy::disallowed_types,
+    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
+)]
 
 //! z.ai Adaptor
 //!
@@ -7,17 +10,17 @@
 //! This adaptor combines Anthropic protocol conversion with Bearer auth.
 
 use super::{current_unix_timestamp, generate_chat_id};
-use burncloud_common::types::OpenAIChatRequest;
+use burncloud_traffic_contracts::OpenAIChatRequest;
 use serde_json::{json, Value};
 
 /// SSE stream termination marker.
 const SSE_DONE_MARKER: &str = "data: [DONE]\n\n";
 
-pub struct ZaiAdaptor;
+pub(crate) struct ZaiAdaptor;
 
 impl ZaiAdaptor {
     /// Convert OpenAI Chat request to z.ai (Anthropic-compatible) request
-    pub fn convert_request(req: OpenAIChatRequest) -> Value {
+    pub(crate) fn convert_request(req: OpenAIChatRequest) -> Value {
         let mut system_prompt = None;
         let mut messages = Vec::new();
 
@@ -55,7 +58,7 @@ impl ZaiAdaptor {
     }
 
     /// Convert z.ai (Anthropic-compatible) response to OpenAI format
-    pub fn convert_response(zai_resp: Value, model: &str) -> Value {
+    pub(crate) fn convert_response(zai_resp: Value, model: &str) -> Value {
         // Extract text from content array
         let text = zai_resp
             .get("content")
@@ -103,7 +106,7 @@ impl ZaiAdaptor {
     ///
     /// ```
     /// This function handles both single-line and multi-line chunks.
-    pub fn convert_stream_chunk(chunk: &str, model: &str) -> Option<String> {
+    pub(crate) fn convert_stream_chunk(chunk: &str, model: &str) -> Option<String> {
         let mut current_event: Option<&str> = None;
 
         // Process each line in the chunk
@@ -184,11 +187,12 @@ impl ZaiAdaptor {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    reason = "test module: fail-fast assertions on router fixtures"
 )]
 mod tests {
     use super::*;
-    use burncloud_common::types::{OpenAIChatMessage, OpenAIChatRequest};
+    use burncloud_traffic_contracts::{OpenAIChatMessage, OpenAIChatRequest};
     use std::collections::HashMap;
 
     #[test]
@@ -199,10 +203,12 @@ mod tests {
                 OpenAIChatMessage {
                     role: "system".to_string(),
                     content: "Be helpful".to_string(),
+                    extra: Default::default(),
                 },
                 OpenAIChatMessage {
                     role: "user".to_string(),
                     content: "Hello".to_string(),
+                    extra: Default::default(),
                 },
             ],
             temperature: Some(0.7),
@@ -259,6 +265,7 @@ mod tests {
             messages: vec![OpenAIChatMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                extra: Default::default(),
             }],
             temperature: None,
             max_tokens: Some(100),
