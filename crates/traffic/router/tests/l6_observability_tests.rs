@@ -9,18 +9,12 @@
 //! - T2: All 7 layer_decision labels round-trip through INSERT → SELECT
 //! - T3: All traffic_color chars (G, Y, R) round-trip through INSERT → SELECT
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_types,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_types)]
 
 mod common;
 
-use burncloud_router::RouterDatabase;
-use burncloud_router::RouterLog;
+use burncloud_database_router::RouterDatabase;
+use burncloud_database_router::RouterLog;
 
 use common::{ensure_error_type_column, ensure_l6_observability_columns, setup_db};
 

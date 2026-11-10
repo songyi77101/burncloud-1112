@@ -126,8 +126,7 @@ impl StreamingTokenCounter {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    reason = "unit-test module: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
+    clippy::redundant_pattern_matching
 )]
 mod tests {
     use super::*;

@@ -15,7 +15,7 @@
 //! affinity. Per decision **D10**: MVP defaults all customers to `Value` until
 //! Trader Class lands.
 
-use burncloud_supply_contracts::Channel;
+use burncloud_common::types::Channel;
 
 /// Per-customer scheduling intent. See module-level docs.
 #[derive(Debug, Clone, PartialEq)]
@@ -181,10 +181,7 @@ impl OrderType {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "unit-test module: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
-)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::scheduler::tests::make_channel;

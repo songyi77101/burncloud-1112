@@ -2,20 +2,12 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::let_and_return,
-    clippy::disallowed_types,
-    clippy::panic_in_result_fn,
-    reason = "integration test: assertions are the failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
+    clippy::disallowed_types
 )]
 
-// The shared test helpers live in `test_utils.rs`. Each integration test target is its own crate, so
-// the module must be declared in every file that uses it -- `api_tests.rs` and
-// `security_invariants.rs` already do. This file called into it without declaring it and therefore
-// did not compile.
-mod test_utils;
-
 use burncloud_database::create_database_with_url;
-use burncloud_router::{RouterDatabase, RouterLog};
-use burncloud_service_user::UserDatabase;
+use burncloud_database_router::{RouterDatabase, RouterLog};
+use burncloud_database_user::UserDatabase;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;

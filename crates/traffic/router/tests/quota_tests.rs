@@ -4,15 +4,13 @@
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
+    clippy::redundant_pattern_matching
 )]
 
 mod common;
 
 use burncloud_database::sqlx;
-use burncloud_router::RouterDatabase;
+use burncloud_database_router::RouterDatabase;
 use common::setup_db;
 use std::time::Duration;
 

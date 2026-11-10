@@ -1,24 +1,5 @@
 use super::console::{PlaceholderPage, PlaceholderPageWithRole};
-use crate::domains::admin::capacity::AdminCapacity as AdminCapacityPage;
-use crate::domains::admin::demand::AdminDemand as AdminDemandPage;
-use crate::domains::admin::models::AdminModels as AdminModelsPage;
-use crate::domains::admin::overview::AdminOverview as AdminOverviewPage;
-use crate::domains::admin::revenue::AdminRevenue as AdminRevenuePage;
-use crate::domains::admin::settlements::AdminSettlements as AdminSettlementsPage;
-use crate::domains::admin::supply::AdminSupply as AdminSupplyPage;
-use crate::domains::buyer::{
-    api_keys::BuyerApiKeys, billing::BuyerBilling, chat::BuyerChat, logs::BuyerLogs,
-    marketplace::BuyerMarketplace, overview::BuyerOverview, playground::BuyerPlayground,
-    usage::BuyerUsage,
-};
-use crate::domains::chat::ChatHome;
-use crate::domains::supplier::deployments::page::SupplierDeployments as SupplierDeploymentsPage;
-use crate::domains::supplier::earnings::page::SupplierEarnings as SupplierEarningsPage;
-use crate::domains::supplier::overview::SupplierOverview as SupplierOverviewPage;
-use crate::domains::supplier::reliability::page::SupplierReliability as SupplierReliabilityPage;
-use crate::domains::supplier::resources::page::SupplierResources as SupplierResourcesPage;
-use crate::domains::supplier::settings::page::SupplierSettings as SupplierSettingsPage;
-use crate::domains::supplier::settlements::page::SupplierSettlements as SupplierSettlementsPage;
+use crate::domains::buyer::{overview::BuyerOverview, playground::BuyerPlayground};
 use crate::shared::types::Role;
 use dioxus::prelude::*;
 
@@ -38,9 +19,6 @@ pub enum Route {
     Buyer {},
     #[route("/buyer/overview")]
     BuyerOverviewRoute {},
-    /// 买方聊天模型选择页。
-    #[route("/buyer/chat")]
-    BuyerChatRoute {},
     #[route("/console")]
     Console {},
     #[route("/console/dashboard")]
@@ -119,11 +97,11 @@ pub enum Route {
 
 #[component]
 pub fn Home() -> Element {
-    rsx! { ChatHome {} }
+    rsx! { BuyerOverview {} }
 }
 #[component]
 pub fn PublicHome() -> Element {
-    rsx! { ChatHome {} }
+    rsx! { PlaceholderPage { title: "Public Portal".to_string() } }
 }
 #[component]
 pub fn Landing() -> Element {
@@ -145,19 +123,6 @@ pub fn Buyer() -> Element {
 pub fn BuyerOverviewRoute() -> Element {
     rsx! { BuyerOverview {} }
 }
-/// 渲染买方聊天模型选择页。
-///
-/// # Examples
-///
-/// 访问 `/buyer/chat` 时由路由系统调用此组件。
-///
-/// # Notes
-///
-/// 页面状态仅存在于当前客户端会话。
-#[component]
-pub fn BuyerChatRoute() -> Element {
-    rsx! { BuyerChat {} }
-}
 #[component]
 pub fn Console() -> Element {
     rsx! { BuyerOverview {} }
@@ -176,23 +141,23 @@ pub fn Playground() -> Element {
 }
 #[component]
 pub fn Marketplace() -> Element {
-    rsx! { BuyerMarketplace {} }
+    rsx! { PlaceholderPage { title: "Marketplace".to_string() } }
 }
 #[component]
 pub fn Billing() -> Element {
-    rsx! { BuyerBilling {} }
+    rsx! { PlaceholderPage { title: "Billing".to_string() } }
 }
 #[component]
 pub fn Logs() -> Element {
-    rsx! { BuyerLogs {} }
+    rsx! { PlaceholderPage { title: "Logs".to_string() } }
 }
 #[component]
 pub fn ApiKeys() -> Element {
-    rsx! { BuyerApiKeys {} }
+    rsx! { PlaceholderPage { title: "API Keys".to_string() } }
 }
 #[component]
 pub fn Usage() -> Element {
-    rsx! { BuyerUsage {} }
+    rsx! { PlaceholderPage { title: "Usage".to_string() } }
 }
 #[component]
 pub fn PublicPlayground() -> Element {
@@ -224,67 +189,67 @@ pub fn PublicLogs() -> Element {
 }
 #[component]
 pub fn Supplier() -> Element {
-    rsx! { SupplierOverviewPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Supplier Overview".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierOverview() -> Element {
-    rsx! { SupplierOverviewPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Supplier Overview".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierResources() -> Element {
-    rsx! { SupplierResourcesPage {} }
+    rsx! { PlaceholderPageWithRole { title: "GPU Resources".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierDeployments() -> Element {
-    rsx! { SupplierDeploymentsPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Autopilot Deployments".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierEarnings() -> Element {
-    rsx! { SupplierEarningsPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Revenue & Payouts".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierSettlements() -> Element {
-    rsx! { SupplierSettlementsPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Settlement Batches".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierReliability() -> Element {
-    rsx! { SupplierReliabilityPage {} }
+    rsx! { PlaceholderPageWithRole { title: "SLA & Reliability".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn SupplierSettings() -> Element {
-    rsx! { SupplierSettingsPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Settings".to_string(), role: Role::Supplier } }
 }
 #[component]
 pub fn Admin() -> Element {
-    rsx! { AdminOverviewPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Admin Overview".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminOverview() -> Element {
-    rsx! { AdminOverviewPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Admin Overview".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminSupply() -> Element {
-    rsx! { AdminSupplyPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Supply Fleet".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminCapacity() -> Element {
-    rsx! { AdminCapacityPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Capacity & Autoscale".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminDemand() -> Element {
-    rsx! { AdminDemandPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Token Demand".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminModels() -> Element {
-    rsx! { AdminModelsPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Model Catalog".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminRevenue() -> Element {
-    rsx! { AdminRevenuePage {} }
+    rsx! { PlaceholderPageWithRole { title: "Platform Revenue".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminSettlements() -> Element {
-    rsx! { AdminSettlementsPage {} }
+    rsx! { PlaceholderPageWithRole { title: "Settlement Batches".to_string(), role: Role::Admin } }
 }
 #[component]
 pub fn AdminSuppliers() -> Element {

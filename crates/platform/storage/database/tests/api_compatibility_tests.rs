@@ -1,9 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::unnecessary_unwrap,
-    reason = "Test-only file: the assertions and unwraps are the test."
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unnecessary_unwrap)]
 use burncloud_database::{create_default_database, Database, DatabaseError};
 
 /// API compatibility and regression tests
@@ -20,7 +15,7 @@ async fn test_database_creation_methods() {
             db.get_connection().is_ok(),
             "Default database should be initialized"
         );
-        db.close().await.ok();
+        let _ = db.close().await;
     }
 
     // Method 2: Using default database (custom paths no longer supported through new_with_path)
@@ -31,7 +26,7 @@ async fn test_database_creation_methods() {
             explicit_db.get_connection().is_ok(),
             "Default database should be initialized"
         );
-        explicit_db.close().await.ok();
+        let _ = explicit_db.close().await;
     }
 
     // Method 3: create_default_database() convenience function
@@ -42,7 +37,7 @@ async fn test_database_creation_methods() {
             default_convenience_db.get_connection().is_ok(),
             "Default convenience database should be initialized"
         );
-        default_convenience_db.close().await.ok();
+        let _ = default_convenience_db.close().await;
     }
 
     println!("✓ All database creation methods tested for consistency");
@@ -87,10 +82,7 @@ async fn test_database_operation_consistency() {
 
         // Test fetch_one
         #[derive(sqlx::FromRow)]
-        #[allow(
-            dead_code,
-            reason = "the row mirrors the SQL columns; not every field is read"
-        )]
+        #[allow(dead_code)]
         struct ApiTestRow {
             id: i64,
             name: String,
@@ -213,7 +205,7 @@ async fn test_backward_compatibility() {
         if result.is_ok() {
             println!("✓ Default database pattern works");
         }
-        path_db.close().await.ok();
+        let _ = path_db.close().await;
     }
 
     // Pattern 2: Default database usage (now simplified)
@@ -231,7 +223,7 @@ async fn test_backward_compatibility() {
                 );
             }
 
-            default_db.close().await.ok();
+            let _ = default_db.close().await;
         }
         Err(e) => {
             println!(
@@ -316,7 +308,7 @@ async fn create_test_databases() -> Vec<(String, Database)> {
 
 async fn cleanup_test_databases(databases: Vec<(String, Database)>) {
     for (db_type, db) in databases {
-        db.close().await.ok();
+        let _ = db.close().await;
         println!("✓ Cleaned up {} database", db_type);
     }
 }

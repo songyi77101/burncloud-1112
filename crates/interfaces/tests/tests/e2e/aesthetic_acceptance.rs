@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "e2e browser tests: unwrap/expect are the intended failure signal and these pedantic lints add no value in ignored, manually-run UI tests"
+    clippy::redundant_pattern_matching
 )]
 //! Aesthetic capture + J1 metrics for aesthetic-optimize-loop.
 //!
@@ -283,7 +282,7 @@ fn eval_metrics_ok(browser: &mut AgentBrowser, page: &str, guest: bool) -> anyho
     if status == "ok" {
         Ok(())
     } else {
-        browser.screenshot(&format!("FAIL-metrics-{}", page)).ok();
+        let _ = browser.screenshot(&format!("FAIL-metrics-{}", page));
         anyhow::bail!("Aesthetic metrics failed on {}: {}", page, status);
     }
 }
@@ -323,13 +322,13 @@ fn seed_review_json(dir: &Path, page_keys: &[&str]) {
         }
     });
     if let Ok(body) = serde_json::to_string_pretty(&review) {
-        fs::write(path, body).ok();
+        let _ = fs::write(path, body);
     }
 }
 
 fn write_outputs(screenshots: &[String], metrics: &Value, status: &str) {
     let dir = artifacts_dir();
-    fs::create_dir_all(&dir).ok();
+    let _ = fs::create_dir_all(&dir);
 
     let page_keys: Vec<&str> = AESTHETIC_PAGES.iter().map(|p| p.screenshot).collect();
     seed_review_json(&dir, &page_keys);
@@ -341,16 +340,14 @@ fn write_outputs(screenshots: &[String], metrics: &Value, status: &str) {
         "review_json": "review.json",
         "metrics_json": "metrics.json",
     });
-    fs::write(
+    let _ = fs::write(
         dir.join("manifest.json"),
         serde_json::to_string_pretty(&manifest).unwrap_or_default(),
-    )
-    .ok();
-    fs::write(
+    );
+    let _ = fs::write(
         dir.join("metrics.json"),
         serde_json::to_string_pretty(metrics).unwrap_or_default(),
-    )
-    .ok();
+    );
 }
 
 /// Capture aesthetic screenshots + run J1 metrics.
@@ -362,7 +359,7 @@ async fn aesthetic_acceptance() {
     let base_url = common::spawn_app().await;
 
     let dir = artifacts_dir();
-    fs::create_dir_all(&dir).ok();
+    let _ = fs::create_dir_all(&dir);
     std::env::set_var("AESTHETIC_ARTIFACTS_DIR", dir.to_string_lossy().to_string());
 
     let mut browser = AgentBrowser::new(&base_url);
@@ -401,9 +398,7 @@ async fn aesthetic_acceptance() {
                 "[E2E-TIMING] page={} path={} open_ms={open_ms} wait_ms={wait_ms} total_ms={total_ms} status=fail_load",
                 page.screenshot, path
             );
-            browser
-                .screenshot(&format!("FAIL-load-{}", page.screenshot))
-                .ok();
+            let _ = browser.screenshot(&format!("FAIL-load-{}", page.screenshot));
             write_outputs(
                 &screenshots,
                 &json!({ "status": "fail", "pages": metrics_by_page }),

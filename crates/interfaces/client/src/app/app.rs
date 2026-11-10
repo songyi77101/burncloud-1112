@@ -2,6 +2,19 @@ use super::router::routes::Route;
 use crate::{i18n::Locale, shared::types::Role};
 use dioxus::prelude::*;
 
+#[component]
+fn DesktopChrome() -> Element {
+    #[cfg(feature = "desktop")]
+    {
+        return rsx! { crate::desktop_chrome::DesktopTitleBar {} };
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    {
+        rsx! {}
+    }
+}
+
 /// Root component shared by LiveView and desktop targets.
 #[component]
 pub fn App() -> Element {
@@ -18,6 +31,7 @@ pub fn App() -> Element {
         });
     });
     rsx! {
+        DesktopChrome {}
         Router::<Route> {}
     }
 }

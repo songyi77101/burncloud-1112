@@ -23,7 +23,7 @@ chrono.workspace = true
 dirs.workspace = true
 regex.workspace = true
 zip.workspace = true
-sha2.workspace = true
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 winapi.workspace = true

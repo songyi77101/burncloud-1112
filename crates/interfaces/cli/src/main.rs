@@ -1,5 +1,3 @@
-#[cfg(any(windows, target_os = "macos"))]
-use anyhow::Context;
 use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
@@ -7,17 +5,13 @@ use std::path::PathBuf;
 mod cli;
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    // Repository setup must not generate runtime secrets or initialize logging.
-    if args.get(1).map(String::as_str) == Some("code") {
-        return run_async_cli(&args[1..]);
-    }
-
     // Load .env file if present
     dotenvy::dotenv().ok();
 
     // Generate and persist required secrets on first local startup.
     ensure_runtime_secrets();
+
+    let args: Vec<String> = env::args().collect();
 
     // For CLI commands (not server/router), suppress INFO logs on stdout
     let is_server = args.len() >= 2 && matches!(args[1].as_str(), "server" | "router" | "client");
@@ -30,13 +24,12 @@ fn main() -> Result<()> {
 
     match args.as_slice() {
         [_] => {
-            // Native desktop application (no args).
-            #[cfg(any(windows, target_os = "macos"))]
+            // burncloud.exe (No args)
+            #[cfg(windows)]
             {
-                let rt = tokio::runtime::Runtime::new()
-                    .context("Failed to initialize the background server runtime")?;
                 // Start Server in background thread
-                std::thread::spawn(move || {
+                std::thread::spawn(|| {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
                     rt.block_on(async {
                         let host =
                             std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -55,7 +48,7 @@ fn main() -> Result<()> {
                 burncloud_client::launch_gui_with_tray();
             }
 
-            #[cfg(not(any(windows, target_os = "macos")))]
+            #[cfg(not(windows))]
             {
                 println!("Starting BurnCloud Server with LiveView (Headless Mode)...");
                 run_async_server()?;
@@ -64,12 +57,12 @@ fn main() -> Result<()> {
         [_, subcommand, _rest @ ..] => {
             match subcommand.as_str() {
                 "client" => {
-                    #[cfg(any(windows, target_os = "macos"))]
+                    #[cfg(windows)]
                     burncloud_client::launch_gui_with_tray();
 
-                    #[cfg(not(any(windows, target_os = "macos")))]
+                    #[cfg(not(windows))]
                     {
-                        println!("Desktop GUI is only available on Windows and macOS.");
+                        println!("Desktop GUI is only available on Windows.");
                         println!("On Linux, use 'burncloud server' to start the web dashboard.");
                     }
                 }

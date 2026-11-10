@@ -8,16 +8,16 @@
 //! - delete: Delete a channel
 
 use anyhow::{anyhow, Result};
+use burncloud_common::types::{Channel, ChannelType};
 use burncloud_database::Database;
-use burncloud_supply_channel::ChannelProviderModel;
-use burncloud_supply_contracts::{Channel, ChannelType};
+use burncloud_database_channel::ChannelProviderModel;
 use clap::ArgMatches;
 use std::io::{self, Write};
 
 /// Parse channel type from string
 ///
 /// Supports: openai, azure, anthropic, gemini, aws, vertexai, deepseek, xunfei
-pub(crate) fn parse_channel_type(s: &str) -> Result<ChannelType> {
+pub fn parse_channel_type(s: &str) -> Result<ChannelType> {
     match s.to_lowercase().as_str() {
         "openai" => Ok(ChannelType::OpenAI),
         "azure" => Ok(ChannelType::Azure),
@@ -38,7 +38,7 @@ pub(crate) fn parse_channel_type(s: &str) -> Result<ChannelType> {
 }
 
 /// Get default models for a channel type
-pub(crate) fn get_default_models(channel_type: ChannelType) -> Vec<&'static str> {
+pub fn get_default_models(channel_type: ChannelType) -> Vec<&'static str> {
     match channel_type {
         ChannelType::OpenAI => vec!["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
         ChannelType::Azure => vec!["gpt-4", "gpt-35-turbo"],
@@ -67,7 +67,7 @@ pub(crate) fn get_default_models(channel_type: ChannelType) -> Vec<&'static str>
 /// Get default base URL for a channel type
 ///
 /// Returns None for types that require user-specified URLs (Azure, AWS, VertexAI)
-pub(crate) fn get_default_base_url(channel_type: ChannelType) -> Option<&'static str> {
+pub fn get_default_base_url(channel_type: ChannelType) -> Option<&'static str> {
     match channel_type {
         ChannelType::OpenAI => Some("https://api.openai.com/v1"),
         ChannelType::Anthropic => Some("https://api.anthropic.com/v1"),
@@ -83,7 +83,7 @@ pub(crate) fn get_default_base_url(channel_type: ChannelType) -> Option<&'static
 }
 
 /// Get human-readable name for channel type
-pub(crate) fn get_channel_type_name(channel_type: ChannelType) -> &'static str {
+pub fn get_channel_type_name(channel_type: ChannelType) -> &'static str {
     match channel_type {
         ChannelType::OpenAI => "OpenAI",
         ChannelType::Azure => "Azure",
@@ -101,12 +101,12 @@ pub(crate) fn get_channel_type_name(channel_type: ChannelType) -> &'static str {
 }
 
 /// Get default channel name based on type
-pub(crate) fn get_default_channel_name(channel_type: ChannelType) -> String {
+pub fn get_default_channel_name(channel_type: ChannelType) -> String {
     format!("{} Channel", get_channel_type_name(channel_type))
 }
 
 /// Handle channel add command
-pub(crate) async fn cmd_channel_add(db: &Database, args: &ArgMatches) -> Result<()> {
+pub async fn cmd_channel_add(db: &Database, args: &ArgMatches) -> Result<()> {
     // Parse channel type
     let type_str = args
         .get_one::<String>("type")
@@ -229,7 +229,7 @@ pub(crate) async fn cmd_channel_add(db: &Database, args: &ArgMatches) -> Result<
 }
 
 /// Handle channel list command
-pub(crate) async fn cmd_channel_list(db: &Database, args: &ArgMatches) -> Result<()> {
+pub async fn cmd_channel_list(db: &Database, args: &ArgMatches) -> Result<()> {
     let format = args
         .get_one::<String>("format")
         .map(|s| s.as_str())
@@ -284,7 +284,7 @@ pub(crate) async fn cmd_channel_list(db: &Database, args: &ArgMatches) -> Result
 }
 
 /// Handle channel show command
-pub(crate) async fn cmd_channel_show(db: &Database, args: &ArgMatches) -> Result<()> {
+pub async fn cmd_channel_show(db: &Database, args: &ArgMatches) -> Result<()> {
     let id: i32 = args
         .get_one::<String>("id")
         .ok_or_else(|| anyhow!("Channel ID is required"))?
@@ -328,7 +328,7 @@ pub(crate) async fn cmd_channel_show(db: &Database, args: &ArgMatches) -> Result
 }
 
 /// Handle channel update command
-pub(crate) async fn cmd_channel_update(db: &Database, args: &ArgMatches) -> Result<()> {
+pub async fn cmd_channel_update(db: &Database, args: &ArgMatches) -> Result<()> {
     let id: i32 = args
         .get_one::<String>("id")
         .ok_or_else(|| anyhow!("Channel ID is required"))?
@@ -419,7 +419,7 @@ pub(crate) async fn cmd_channel_update(db: &Database, args: &ArgMatches) -> Resu
 }
 
 /// Handle channel delete command
-pub(crate) async fn cmd_channel_delete(db: &Database, args: &ArgMatches) -> Result<()> {
+pub async fn cmd_channel_delete(db: &Database, args: &ArgMatches) -> Result<()> {
     let id: i32 = args
         .get_one::<String>("id")
         .ok_or_else(|| anyhow!("Channel ID is required"))?
@@ -453,7 +453,7 @@ pub(crate) async fn cmd_channel_delete(db: &Database, args: &ArgMatches) -> Resu
 }
 
 /// Handle channel command routing
-pub(crate) async fn handle_channel_command(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn handle_channel_command(db: &Database, matches: &ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("add", sub_m)) => cmd_channel_add(db, sub_m).await,
         Some(("list", sub_m)) => cmd_channel_list(db, sub_m).await,
@@ -474,11 +474,7 @@ pub(crate) async fn handle_channel_command(db: &Database, matches: &ArgMatches) 
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "unit tests assert on parsed values and fail loudly on unexpected input"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

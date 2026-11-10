@@ -577,11 +577,15 @@ mod tests {
         }
 
         let level = breaker.allow_request();
-        if let TripLevel::Degraded { weight } = level {
-            assert!(weight < 1.0);
+        match level {
+            TripLevel::Degraded { weight } => {
+                assert!(weight < 1.0);
+            }
+            _ => {}
         }
     }
 
+    #[test]
     #[test]
     fn test_multi_level_breaker() {
         let config = SmartCircuitBreakerConfig {

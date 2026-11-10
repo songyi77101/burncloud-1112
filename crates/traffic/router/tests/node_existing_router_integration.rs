@@ -1,29 +1,4 @@
-#![allow(clippy::expect_used, reason = "独立测试固定前提失败应中止")]
-// 本文件验证既有候选及事务回滚，不代替受控 HTTP 派发测试或真实模型推理验收。
 use burncloud_database::create_database_with_url;
-
-/// Build a SQLite connection URL for a filesystem path.
-///
-/// **The three-slash rule.** `sqlite:///C:/data/db.sqlite` is the absolute form; `sqlite://C:/data/db.sqlite`
-/// has only two slashes after the scheme, so SQLite reads `C:` as a **host** and refuses the connection with
-/// `(code: 14) unable to open database file`. A relative path keeps two slashes, because with three the leading
-/// `/` would become part of the path and turn `data/db.sqlite` into `/data/db.sqlite`.
-///
-/// A local copy of `burncloud_database::sqlite_url`, which lives in an open pull request rather than on `main`;
-/// see the note in this crate's `tests/common.rs`.
-fn sqlite_url(path: &str) -> String {
-    let normalised = path.replace('\\', "/");
-    let absolute = normalised.starts_with('/') || {
-        let head: Vec<char> = normalised.chars().take(3).collect();
-        head.len() == 3 && head[0].is_ascii_alphabetic() && head[1] == ':' && head[2] == '/'
-    };
-    if absolute {
-        format!("sqlite:///{}?mode=rwc", normalised.trim_start_matches('/'))
-    } else {
-        format!("sqlite://{}?mode=rwc", normalised)
-    }
-}
-
 use burncloud_router::local_attachment::{
     ExistingRouterLocalAttacher, LocalRouteAttacher, LocalRouteAttachment,
 };
@@ -36,10 +11,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn ready_node_endpoint_round_trips_through_existing_model_router() {
     let temp = tempfile::NamedTempFile::new().expect("temp database");
-    // `sqlite_url`, not an inline `format!`: `main` fixed the same defect with `#[cfg(windows)]`, and the two
-    // produce the identical URL on Windows, compared directly. The helper is kept so the three-slash rule has
-    // one definition rather than a copy per call site.
-    let url = sqlite_url(&temp.path().to_string_lossy());
+    let url = format!("sqlite://{}?mode=rwc", temp.path().display());
     let db = Arc::new(
         create_database_with_url(&url)
             .await
@@ -49,7 +21,6 @@ async fn ready_node_endpoint_round_trips_through_existing_model_router() {
     let attacher = ExistingRouterLocalAttacher::new(db.clone());
     let model_router = ModelRouter::new(db);
     let model = "phase0-local-model";
-    let server = ProbeServer::new(model).await;
 
     assert!(model_router
         .get_candidates("default", model)
@@ -60,7 +31,7 @@ async fn ready_node_endpoint_round_trips_through_existing_model_router() {
     let attachment_id = attacher
         .attach(LocalRouteAttachment {
             model: model.to_string(),
-            base_url: server.url.clone(),
+            base_url: "http://127.0.0.1:18080".to_string(),
         })
         .await
         .expect("attach ready local endpoint");
@@ -73,7 +44,7 @@ async fn ready_node_endpoint_round_trips_through_existing_model_router() {
     assert_eq!(candidates[0].0.id, attachment_id.0);
     assert_eq!(
         candidates[0].0.base_url.as_deref(),
-        Some(server.url.as_str())
+        Some("http://127.0.0.1:18080")
     );
 
     attacher
@@ -105,10 +76,7 @@ async fn ready_node_endpoint_round_trips_through_existing_model_router() {
 #[tokio::test]
 async fn failed_quarantine_rolls_back_routing_ability() {
     let temp = tempfile::NamedTempFile::new().expect("temp database");
-    // `sqlite_url`, not an inline `format!`: `main` fixed the same defect with `#[cfg(windows)]`, and the two
-    // produce the identical URL on Windows, compared directly. The helper is kept so the three-slash rule has
-    // one definition rather than a copy per call site.
-    let url = sqlite_url(&temp.path().to_string_lossy());
+    let url = format!("sqlite://{}?mode=rwc", temp.path().display());
     let db = Arc::new(
         create_database_with_url(&url)
             .await
@@ -118,12 +86,11 @@ async fn failed_quarantine_rolls_back_routing_ability() {
     let attacher = ExistingRouterLocalAttacher::new(db.clone());
     let model_router = ModelRouter::new(db.clone());
     let model = "phase0-quarantine-rollback-model";
-    let server = ProbeServer::new(model).await;
 
     let attachment_id = attacher
         .attach(LocalRouteAttachment {
             model: model.to_string(),
-            base_url: server.url.clone(),
+            base_url: "http://127.0.0.1:18081".to_string(),
         })
         .await
         .expect("attach ready local endpoint");
@@ -179,34 +146,4 @@ async fn failed_quarantine_rolls_back_routing_ability() {
         .await
         .expect("candidate after successful quarantine")
         .is_empty());
-}
-
-struct ProbeServer {
-    url: String,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Drop for ProbeServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-impl ProbeServer {
-    async fn new(model: &str) -> Self {
-        let model = model.to_owned();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("受控探测服务");
-        let url = format!("http://{}", listener.local_addr().expect("监听地址"));
-        let app = axum::Router::new().route(
-            "/v1/models",
-            axum::routing::get(move || {
-                let model = model.clone();
-                async move { axum::Json(serde_json::json!({"data":[{"id":model}]})) }
-            }),
-        );
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("探测服务运行");
-        });
-        Self { url, task }
-    }
 }

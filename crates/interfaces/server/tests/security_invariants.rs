@@ -1,10 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_types,
-    clippy::panic_in_result_fn,
-    reason = "integration test: assertions are the failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_types)]
 
 mod test_utils;
 
@@ -14,9 +8,9 @@ mod test_utils;
 mod node_framework_e2e;
 
 use burncloud_database::Database;
-use burncloud_identity_token::TokenService;
-use burncloud_router::RouterToken;
+use burncloud_database_router::RouterToken;
 use burncloud_server::InternalSecret;
+use burncloud_service_token::TokenService;
 use burncloud_service_user::{JwtSecret, UserService};
 use reqwest::{Client, StatusCode};
 use serde_json::Value;

@@ -3,15 +3,14 @@
 //! This module provides CLI commands for managing exchange rates and currency conversion.
 
 use anyhow::Result;
-use burncloud_commerce_contracts::price_u64::{rate_to_scaled, scaled_to_rate};
-use burncloud_commerce_contracts::pricing::Currency;
+use burncloud_common::{rate_to_scaled, scaled_to_rate, Currency};
 use burncloud_database::sqlx;
 use burncloud_database::Database;
 use clap::ArgMatches;
 use std::str::FromStr;
 
 /// Handle currency subcommands
-pub(crate) async fn handle_currency_command(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn handle_currency_command(db: &Database, matches: &ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list-rates", _)) => cmd_list_rates(db).await,
         Some(("set-rate", sub_m)) => {
@@ -243,15 +242,11 @@ async fn cmd_convert(db: &Database, amount: f64, from: &str, to: &str) -> Result
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "unit tests assert on parsed currency values and fail loudly on unexpected input"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     #[test]
     fn test_currency_parsing() {
-        use burncloud_commerce_contracts::pricing::Currency;
+        use burncloud_common::Currency;
         use std::str::FromStr;
 
         assert_eq!(

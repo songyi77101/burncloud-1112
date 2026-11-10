@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "integration-test code: panicking on fixture failures is the intended signal, and fixtures use plain Value formatting and patterns"
+    clippy::redundant_pattern_matching
 )]
 //! Region-Based Pricing Integration Tests
 //!

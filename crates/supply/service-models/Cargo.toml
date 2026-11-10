@@ -1,0 +1,24 @@
+[package]
+publish.workspace = true
+license.workspace = true
+name = "burncloud-service-models"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+burncloud-database-model.workspace = true
+burncloud-service-ip.workspace = true
+burncloud-service-setting.workspace = true
+burncloud-download.workspace = true
+tokio.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+
+[[example]]
+name = "service-models-usage"
+path = "examples/usage.rs"
+
+[lints]
+workspace = true

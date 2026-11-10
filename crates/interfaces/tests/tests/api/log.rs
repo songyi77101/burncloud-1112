@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "integration-test code: panicking on fixture failures is the intended signal, and fixtures use plain Value formatting and patterns"
+    clippy::redundant_pattern_matching
 )]
 use burncloud_tests::TestClient;
 use serde_json::json;
@@ -33,10 +32,9 @@ async fn test_billing_accuracy() {
             "weight": 10,
             "priority": 100
         });
-        admin_client
+        let _ = admin_client
             .post("/console/api/channel", &channel_body)
-            .await
-            .ok();
+            .await;
     } else {
         println!("SKIPPING: No Upstream Config");
         return;

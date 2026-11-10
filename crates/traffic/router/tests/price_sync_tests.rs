@@ -4,46 +4,21 @@
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
+    clippy::redundant_pattern_matching
 )]
 
 mod common;
 
-use burncloud_commerce_contracts::price_u64::dollars_to_nano;
-use burncloud_commerce_contracts::pricing::{
+use burncloud_common::dollars_to_nano;
+use burncloud_common::pricing_config::{
     CurrencyPricing, ModelMetadata, ModelPricing, PricingConfig,
 };
 use burncloud_database::create_database_with_url;
-
-/// Build a SQLite connection URL for a filesystem path.
-///
-/// **The three-slash rule.** `sqlite:///C:/data/db.sqlite` is the absolute form; `sqlite://C:/data/db.sqlite`
-/// has only two slashes after the scheme, so SQLite reads `C:` as a **host** and refuses the connection with
-/// `(code: 14) unable to open database file`. A relative path keeps two slashes, because with three the leading
-/// `/` would become part of the path and turn `data/db.sqlite` into `/data/db.sqlite`.
-///
-/// A local copy of `burncloud_database::sqlite_url`, which lives in an open pull request rather than on `main`;
-/// see the note in this crate's `tests/common.rs`.
-fn sqlite_url(path: &str) -> String {
-    let normalised = path.replace('\\', "/");
-    let absolute = normalised.starts_with('/') || {
-        let head: Vec<char> = normalised.chars().take(3).collect();
-        head.len() == 3 && head[0].is_ascii_alphabetic() && head[1] == ':' && head[2] == '/'
-    };
-    if absolute {
-        format!("sqlite:///{}?mode=rwc", normalised.trim_start_matches('/'))
-    } else {
-        format!("sqlite://{}?mode=rwc", normalised)
-    }
-}
-
-use burncloud_commerce_billing::{
+use burncloud_database_billing::{
     BillingPriceModel, BillingTieredPriceModel, PriceInput, TieredPriceInput,
 };
+use burncloud_database_router::RouterDatabase;
 use burncloud_router::price_sync::{PriceSyncConfig, PriceSyncService};
-use burncloud_router::RouterDatabase;
 use common::setup_db;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -488,12 +463,9 @@ async fn test_sync_failure_preserves_old_prices() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cold_start_db_empty_network_fail() -> anyhow::Result<()> {
     // Use a unique temp file so this test is isolated from the shared test DB
-    let tmp_path = std::env::temp_dir()
-        .join("burncloud_cold_start_test.db")
-        .to_string_lossy()
-        .to_string();
-    std::fs::remove_file(&tmp_path).ok(); // clean up from any previous run
-    let url = sqlite_url(&tmp_path);
+    let tmp_path = "/tmp/burncloud_cold_start_test.db".to_string();
+    let _ = std::fs::remove_file(&tmp_path); // clean up from any previous run
+    let url = format!("sqlite://{}?mode=rwc", tmp_path);
     let db = create_database_with_url(&url).await?;
     RouterDatabase::init(&db).await?;
     let db = Arc::new(db);
@@ -511,7 +483,7 @@ async fn test_cold_start_db_empty_network_fail() -> anyhow::Result<()> {
 
     // DB is empty, remote unreachable → must return Err (fatal)
     let result = service.sync_all(false).await;
-    std::fs::remove_file(&tmp_path).ok(); // cleanup
+    let _ = std::fs::remove_file(&tmp_path); // cleanup
     assert!(
         result.is_err(),
         "Cold start with empty DB and unreachable remote must return Err"
@@ -525,12 +497,9 @@ async fn test_cold_start_db_empty_network_fail() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_startup_fast_path_uses_db() -> anyhow::Result<()> {
     // Use a unique temp file so this test is isolated from the shared test DB
-    let tmp_path = std::env::temp_dir()
-        .join("burncloud_fast_path_test.db")
-        .to_string_lossy()
-        .to_string();
-    std::fs::remove_file(&tmp_path).ok();
-    let url = sqlite_url(&tmp_path);
+    let tmp_path = "/tmp/burncloud_fast_path_test.db".to_string();
+    let _ = std::fs::remove_file(&tmp_path);
+    let url = format!("sqlite://{}?mode=rwc", tmp_path);
     let db = create_database_with_url(&url).await?;
     RouterDatabase::init(&db).await?;
     let db = Arc::new(db);
@@ -557,7 +526,7 @@ async fn test_startup_fast_path_uses_db() -> anyhow::Result<()> {
     let mut service = PriceSyncService::with_config(db.clone(), config);
 
     let result = service.sync_all(false).await;
-    std::fs::remove_file(&tmp_path).ok(); // cleanup
+    let _ = std::fs::remove_file(&tmp_path); // cleanup
     let result = result?;
     assert_eq!(
         result.source, "db_cache",
@@ -570,7 +539,7 @@ async fn test_startup_fast_path_uses_db() -> anyhow::Result<()> {
 /// Test model count drop protection: sync still succeeds with a warning when >50% of models drop
 #[tokio::test]
 async fn test_model_count_drop_protection() -> anyhow::Result<()> {
-    use burncloud_commerce_contracts::pricing::{CurrencyPricing, ModelPricing};
+    use burncloud_common::pricing_config::{CurrencyPricing, ModelPricing};
     use std::collections::HashMap;
 
     let (db, _pool, _db_url) = setup_db().await?;
@@ -618,7 +587,7 @@ async fn test_model_count_drop_protection() -> anyhow::Result<()> {
             realtime_pricing: None,
         },
     );
-    let config = burncloud_commerce_contracts::pricing::PricingConfig {
+    let config = burncloud_common::pricing_config::PricingConfig {
         version: "1.0".to_string(),
         updated_at: chrono::Utc::now(),
         source: "test".to_string(),

@@ -6,19 +6,13 @@
 //! - T2: CostCalculator::preflight rejects unknown models (strict) and allows them (non-strict)
 //! - T3: Post-settle PriceNotFound sets cost_status="price_missing" and increments counter
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_types,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_types)]
 
 mod common;
 
-use burncloud_commerce_billing::{BillingError, CostCalculator, PriceCache};
-use burncloud_commerce_billing::{BillingPriceModel, PriceInput};
-use burncloud_router::{RouterDatabase, RouterLog};
+use burncloud_database_billing::{BillingPriceModel, PriceInput};
+use burncloud_database_router::{RouterDatabase, RouterLog};
+use burncloud_service_billing::{BillingError, CostCalculator, PriceCache};
 use common::setup_db;
 
 /// Build a minimal `RouterLog` for testing. Only `cost_status` varies between

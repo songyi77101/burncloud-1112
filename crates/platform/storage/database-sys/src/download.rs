@@ -9,28 +9,24 @@ use serde::{Deserialize, Serialize};
 pub struct SysDownload {
     /// Download GID (from aria2)
     pub gid: String,
-    /// Download status
-    pub status: String,
     /// JSON array of URIs
     pub uris: String,
-    /// Total bytes
-    pub total_length: Option<i64>,
-    /// Completed bytes
-    pub completed_length: Option<i64>,
-    /// Download speed (bytes/sec)
-    pub download_speed: Option<i64>,
     /// Download directory
     pub download_dir: Option<String>,
     /// Extracted filename
     pub filename: Option<String>,
-    /// Number of connections
-    pub connections: Option<i64>,
-    /// Number of split connections
-    pub split: Option<i64>,
+    /// Download status
+    pub status: String,
+    /// Total bytes
+    pub total: i64,
+    /// Completed bytes
+    pub completed: i64,
+    /// Download speed (bytes/sec)
+    pub speed: i64,
     /// Created timestamp
-    pub created_at: Option<String>,
+    pub created_at: String,
     /// Updated timestamp
-    pub updated_at: Option<String>,
+    pub updated_at: String,
 }
 
 /// Download database
@@ -47,19 +43,6 @@ impl DownloadDB {
         Ok(instance)
     }
 
-    /// Wrap an existing database connection and create the download table on it.
-    ///
-    /// The counterpart of [`SettingDatabase::new_with_db`](crate::SettingDatabase::new_with_db), and it exists
-    /// for the same reason: [`DownloadDB::new`] opens `Database::new()`, which honours `BURNCLOUD_DATABASE_URL`
-    /// and otherwise uses the **shared default path** under the user's data directory. A test that used it would
-    /// write download records into the developer's real database and could not run twice cleanly. This lets a
-    /// caller -- a test, or a binary that already holds a connection -- supply the database instead.
-    pub async fn new_with_db(db: Database) -> Result<Self> {
-        let instance = Self { db };
-        instance.init_tables().await?;
-        Ok(instance)
-    }
-
     /// Initialize database tables
     async fn init_tables(&self) -> Result<()> {
         self.db
@@ -67,17 +50,15 @@ impl DownloadDB {
                 r#"
             CREATE TABLE IF NOT EXISTS sys_downloads (
                 gid TEXT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'waiting',
                 uris TEXT NOT NULL,
-                total_length INTEGER DEFAULT 0,
-                completed_length INTEGER DEFAULT 0,
-                download_speed INTEGER DEFAULT 0,
                 download_dir TEXT,
                 filename TEXT,
-                connections INTEGER DEFAULT 16,
-                split INTEGER DEFAULT 5,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                status TEXT NOT NULL DEFAULT 'active',
+                total INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                speed INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_sys_downloads_status ON sys_downloads(status);
             CREATE INDEX IF NOT EXISTS idx_sys_downloads_created_at ON sys_downloads(created_at);
@@ -102,12 +83,12 @@ impl DownloadDB {
         self.db
             .execute_query_with_params(
                 r#"
-                INSERT INTO sys_downloads (gid, status, uris, download_dir, filename, updated_at)
-                VALUES (?, 'active', ?, ?, ?, ?)
+                INSERT INTO sys_downloads (gid, uris, download_dir, filename, status, updated_at)
+                VALUES (?, ?, ?, ?, 'active', ?)
                 "#,
                 vec![
                     gid.to_string(),
-                    serde_json::to_string(&uris)?,
+                    serde_json::to_string(&uris).unwrap_or_default(),
                     download_dir.unwrap_or("").to_string(),
                     filename.unwrap_or("").to_string(),
                     Self::now_string(),
@@ -132,17 +113,17 @@ impl DownloadDB {
     pub async fn update_progress(
         &self,
         gid: &str,
-        total_length: i64,
-        completed_length: i64,
-        download_speed: i64,
+        total: i64,
+        completed: i64,
+        speed: i64,
     ) -> Result<()> {
         self.db
             .execute_query_with_params(
-                "UPDATE sys_downloads SET total_length = ?, completed_length = ?, download_speed = ?, updated_at = ? WHERE gid = ?",
+                "UPDATE sys_downloads SET total = ?, completed = ?, speed = ?, updated_at = ? WHERE gid = ?",
                 vec![
-                    total_length.to_string(),
-                    completed_length.to_string(),
-                    download_speed.to_string(),
+                    total.to_string(),
+                    completed.to_string(),
+                    speed.to_string(),
                     Self::now_string(),
                     gid.to_string(),
                 ],
@@ -168,8 +149,7 @@ impl DownloadDB {
             Some(s) => {
                 self.db
                     .fetch_all_with_params::<SysDownload>(
-                        "SELECT gid, status, uris, total_length, completed_length, download_speed, download_dir, filename, connections, split, created_at, updated_at \
-                         FROM sys_downloads WHERE status = ? ORDER BY created_at DESC",
+                        "SELECT * FROM sys_downloads WHERE status = ? ORDER BY created_at DESC",
                         vec![s.to_string()],
                     )
                     .await
@@ -177,25 +157,11 @@ impl DownloadDB {
             None => {
                 self.db
                     .fetch_all::<SysDownload>(
-                        "SELECT gid, status, uris, total_length, completed_length, download_speed, download_dir, filename, connections, split, created_at, updated_at \
-                         FROM sys_downloads ORDER BY created_at DESC",
+                        "SELECT * FROM sys_downloads ORDER BY created_at DESC",
                     )
                     .await
             }
         }
-    }
-
-    /// 按 GID 查询单条下载记录。
-    ///
-    /// 只有查询成功且 GID 不存在时才返回 `Ok(None)`；查询失败会向调用方传播，不能被误认为记录不存在。
-    pub async fn get(&self, gid: &str) -> Result<Option<SysDownload>> {
-        self.db
-            .fetch_optional_with_params::<SysDownload>(
-                "SELECT gid, status, uris, total_length, completed_length, download_speed, download_dir, filename, connections, split, created_at, updated_at \
-                 FROM sys_downloads WHERE gid = ?",
-                vec![gid.to_string()],
-            )
-            .await
     }
 
     /// Update the GID of a download record (used when restoring incomplete downloads)

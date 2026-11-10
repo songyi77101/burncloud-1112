@@ -9,7 +9,6 @@ edition = "2021"
 exchange-api = []
 
 [dependencies]
-rand.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
@@ -21,17 +20,12 @@ dashmap.workspace = true
 log = { workspace = true }
 
 burncloud-database = { workspace = true }
-burncloud-supply-model = { workspace = true }
-burncloud-supply-channel = { workspace = true }
-burncloud-commerce-contracts = { workspace = true }
-burncloud-supply-contracts = { workspace = true }
-burncloud-traffic-contracts = { workspace = true }
+burncloud-database-router = { workspace = true }
+burncloud-database-billing = { workspace = true }
+burncloud-database-channel = { workspace = true }
 burncloud-common = { workspace = true }
-burncloud-commerce-billing = { workspace = true }
-burncloud-identity-user = { workspace = true }
-burncloud-identity-token = { workspace = true }
-sqlx.workspace = true
-aes-gcm.workspace = true
+burncloud-service-billing = { workspace = true }
+burncloud-service-user = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 jsonwebtoken = { workspace = true }
 once_cell = { workspace = true }

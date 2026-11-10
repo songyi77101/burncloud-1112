@@ -5,15 +5,13 @@
     clippy::unnecessary_cast,
     clippy::let_and_return,
     clippy::redundant_pattern_matching,
-    unused_variables,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
+    unused_variables
 )]
 
 mod common;
 
-use burncloud_commerce_billing::{BillingPriceModel, PriceInput};
-use burncloud_commerce_contracts::price_u64::dollars_to_nano;
+use burncloud_common::dollars_to_nano;
+use burncloud_database_billing::{BillingPriceModel, PriceInput};
 use common::setup_db;
 
 /// Helper to convert dollars to nanodollars as i64

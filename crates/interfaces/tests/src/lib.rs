@@ -1,8 +1,5 @@
 // Integration test client uses Value for HTTP response assertion; no domain types here.
-#![allow(
-    clippy::disallowed_types,
-    reason = "integration test client uses Value for HTTP response assertion; no domain types here"
-)]
+#![allow(clippy::disallowed_types)]
 
 use anyhow::{ensure, Result};
 use reqwest::Client;

@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "integration-test code: panicking on fixture failures is the intended signal, and fixtures use plain Value formatting and patterns"
+    clippy::redundant_pattern_matching
 )]
 //! Step 3: File Upload Tests via SFTP
 //!
@@ -101,7 +100,7 @@ fn test_upload_files() {
 
 /// Upload directory recursively via SFTP
 fn upload_directory(sftp: &ssh2::Sftp, local: &Path, remote: &str) {
-    sftp.mkdir(Path::new(remote), 0o755).ok(); // Ignore error if exists
+    let _ = sftp.mkdir(Path::new(remote), 0o755); // Ignore error if exists
 
     for entry in std::fs::read_dir(local).expect("Failed to read directory") {
         let entry = entry.expect("Failed to read entry");

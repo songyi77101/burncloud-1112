@@ -4,8 +4,7 @@ use std::process::{Command, Stdio};
 pub fn cleanup_stale_e2e_processes() {
     #[cfg(windows)]
     {
-        // Best effort: the process may already be gone, and a missing PowerShell is not fatal.
-        Command::new("powershell")
+        let _ = Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
@@ -17,29 +16,24 @@ pub fn cleanup_stale_e2e_processes() {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .ok();
+            .status();
     }
     #[cfg(not(windows))]
     {
-        // Best effort: nothing to kill when pkill is unavailable or no process matches.
-        Command::new("pkill")
+        let _ = Command::new("pkill")
             .args(["-f", "api_tests-"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .ok();
-        Command::new("pkill")
+            .status();
+        let _ = Command::new("pkill")
             .args(["-f", "burncloud"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .ok();
-        Command::new("pkill")
+            .status();
+        let _ = Command::new("pkill")
             .args(["-f", "agent-browser"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .ok();
+            .status();
     }
 }

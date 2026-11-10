@@ -2,13 +2,15 @@ use anyhow::Result;
 use burncloud_common::scaled_to_rate;
 use burncloud_database::sqlx;
 use burncloud_database::Database;
-use burncloud_router::{get_usage_stats, get_usage_stats_by_token, RouterDatabase, RouterLog};
+use burncloud_database_router::{
+    get_usage_stats, get_usage_stats_by_token, RouterDatabase, RouterLog,
+};
 use clap::ArgMatches;
 use serde::Serialize;
 
 /// Log list item for JSON output
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct LogListItem {
+pub struct LogListItem {
     pub id: i64,
     pub request_id: String,
     pub user_id: Option<String>,
@@ -71,7 +73,7 @@ fn extract_model_from_path(path: &str) -> String {
 }
 
 /// Handle log list command
-pub(crate) async fn cmd_log_list(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_log_list(db: &Database, matches: &ArgMatches) -> Result<()> {
     let user_id = matches.get_one::<String>("user-id").map(|s| s.as_str());
     let channel_id = matches.get_one::<String>("channel-id").map(|s| s.as_str());
     let model = matches.get_one::<String>("model").map(|s| s.as_str());
@@ -147,7 +149,7 @@ pub(crate) async fn cmd_log_list(db: &Database, matches: &ArgMatches) -> Result<
 }
 
 /// Route log commands
-pub(crate) async fn handle_log_command(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn handle_log_command(db: &Database, matches: &ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list", sub_m)) => {
             cmd_log_list(db, sub_m).await?;
@@ -165,7 +167,7 @@ pub(crate) async fn handle_log_command(db: &Database, matches: &ArgMatches) -> R
 }
 
 /// Handle log usage command
-pub(crate) async fn cmd_log_usage(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_log_usage(db: &Database, matches: &ArgMatches) -> Result<()> {
     let period = matches
         .get_one::<String>("period")
         .map(|s| s.as_str())
@@ -260,7 +262,7 @@ pub(crate) async fn cmd_log_usage(db: &Database, matches: &ArgMatches) -> Result
 
 /// Output structure for usage command (JSON format)
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct UsageOutput {
+pub struct UsageOutput {
     pub user_id: String,
     pub period: String,
     pub total_requests: i64,

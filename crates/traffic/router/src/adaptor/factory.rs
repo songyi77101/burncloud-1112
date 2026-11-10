@@ -1,14 +1,10 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(
-    clippy::disallowed_types,
-    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
-)]
+#![allow(clippy::disallowed_types)]
 
 use async_trait::async_trait;
+use burncloud_common::types::{ChannelType, OpenAIChatRequest};
 use burncloud_database::Database;
-use burncloud_supply_channel::{ChannelProtocolConfig, ChannelProtocolConfigModel};
-use burncloud_supply_contracts::ChannelType;
-use burncloud_traffic_contracts::OpenAIChatRequest;
+use burncloud_database_channel::{ChannelProtocolConfig, ChannelProtocolConfigModel};
 use dashmap::DashMap;
 use reqwest::RequestBuilder;
 use serde_json::Value;
@@ -19,10 +15,7 @@ use std::sync::Arc;
 #[async_trait]
 pub trait ChannelAdaptor: Send + Sync {
     /// Returns the name of the adaptor (e.g., "OpenAI", "Claude").
-    #[allow(
-        dead_code,
-        reason = "trait method implemented by all adaptors; not called on the `dyn` path yet"
-    )]
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
 
     /// Converts an OpenAI-compatible request to the vendor-specific request body.
@@ -48,10 +41,7 @@ pub trait ChannelAdaptor: Send + Sync {
     ) -> RequestBuilder;
 
     /// Checks if the adaptor supports streaming for the given model/request.
-    #[allow(
-        dead_code,
-        reason = "trait method implemented by all adaptors; not called on the `dyn` path yet"
-    )]
+    #[allow(dead_code)]
     fn supports_stream(&self) -> bool {
         true
     }
@@ -64,7 +54,7 @@ pub trait ChannelAdaptor: Send + Sync {
 }
 
 // Implementations will go here or in submodules
-pub(crate) struct OpenAIAdaptor;
+pub struct OpenAIAdaptor;
 #[async_trait]
 impl ChannelAdaptor for OpenAIAdaptor {
     fn name(&self) -> &'static str {
@@ -81,7 +71,7 @@ impl ChannelAdaptor for OpenAIAdaptor {
     }
 }
 
-pub(crate) struct AnthropicAdaptor;
+pub struct AnthropicAdaptor;
 #[async_trait]
 impl ChannelAdaptor for AnthropicAdaptor {
     fn name(&self) -> &'static str {
@@ -113,7 +103,7 @@ impl ChannelAdaptor for AnthropicAdaptor {
     }
 }
 
-pub(crate) struct GoogleGeminiAdaptor;
+pub struct GoogleGeminiAdaptor;
 #[async_trait]
 impl ChannelAdaptor for GoogleGeminiAdaptor {
     fn name(&self) -> &'static str {
@@ -213,7 +203,7 @@ impl ChannelAdaptor for GoogleGeminiAdaptor {
 }
 
 /// z.ai Adaptor - Uses Anthropic-compatible protocol with Bearer authentication
-pub(crate) struct ZaiAdaptor;
+pub struct ZaiAdaptor;
 
 #[async_trait]
 impl ChannelAdaptor for ZaiAdaptor {
@@ -250,10 +240,10 @@ impl ChannelAdaptor for ZaiAdaptor {
     }
 }
 
-pub(crate) struct AdaptorFactory;
+pub struct AdaptorFactory;
 
 impl AdaptorFactory {
-    pub(crate) fn get_adaptor(channel_type: ChannelType) -> Box<dyn ChannelAdaptor> {
+    pub fn get_adaptor(channel_type: ChannelType) -> Box<dyn ChannelAdaptor> {
         match channel_type {
             ChannelType::OpenAI
             | ChannelType::Azure
@@ -338,10 +328,7 @@ impl DynamicAdaptorFactory {
     }
 
     /// Get an adaptor using the default API version for the channel type
-    #[allow(
-        dead_code,
-        reason = "public factory entry point for default-version adaptors; callers use the versioned one"
-    )]
+    #[allow(dead_code)]
     pub async fn get_default_adaptor(&self, channel_type: ChannelType) -> Arc<dyn ChannelAdaptor> {
         let channel_type_id = channel_type as i32;
 
@@ -379,10 +366,7 @@ impl DynamicAdaptorFactory {
     }
 
     /// Load the default dynamic adaptor for a channel type
-    #[allow(
-        dead_code,
-        reason = "used by `get_default_adaptor`, which has no in-crate caller yet"
-    )]
+    #[allow(dead_code)]
     async fn load_default_adaptor(
         &self,
         channel_type: i32,
@@ -432,10 +416,7 @@ impl DynamicAdaptorFactory {
     }
 
     /// Remove a specific adaptor from the cache
-    #[allow(
-        dead_code,
-        reason = "public cache-invalidation hook for admin/config reload paths"
-    )]
+    #[allow(dead_code)]
     pub fn invalidate(&self, channel_type: i32, api_version: &str) {
         let key = AdaptorCacheKey {
             channel_type,

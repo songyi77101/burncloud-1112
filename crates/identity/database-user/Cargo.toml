@@ -1,0 +1,17 @@
+[package]
+publish.workspace = true
+license.workspace = true
+name = "burncloud-database-user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+burncloud-database.workspace = true
+burncloud-common.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+tracing.workspace = true
+rand = { workspace = true, features = ["std_rng"] }
+
+[lints]
+workspace = true

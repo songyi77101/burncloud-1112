@@ -9,7 +9,7 @@ use burncloud_server::node_attachment::{
 };
 use burncloud_server::node_orchestrator::{ModelDemand, NodeOrchestrator};
 use burncloud_server::node_request::NodeRequestState;
-use burncloud_supply_model::FakeModelResolver;
+use burncloud_service_models::FakeModelResolver;
 
 fn fake_orchestrator() -> NodeOrchestrator<
     FakeModelResolver,

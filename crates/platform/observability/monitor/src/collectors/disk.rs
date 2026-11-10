@@ -12,14 +12,6 @@ use winapi::um::fileapi::GetDiskFreeSpaceExW;
 #[cfg(unix)]
 use std::fs;
 
-#[cfg(unix)]
-fn normalize_unix_unsigned<T>(value: T) -> u64
-where
-    u64: From<T>,
-{
-    u64::from(value)
-}
-
 /// 磁盘数据收集器
 pub struct DiskCollector;
 
@@ -55,8 +47,6 @@ impl DiskCollector {
 
     #[cfg(windows)]
     async fn get_disk_info_windows(&self, path: &str) -> Result<DiskInfo, MonitorError> {
-        // SAFETY: `path_wide` is NUL-terminated and all output pointers refer to valid local u64 storage.
-        // GetDiskFreeSpaceExW writes only for the duration of the call and no pointer escapes this block.
         unsafe {
             let path_wide: Vec<u16> = OsStr::new(path)
                 .encode_wide()
@@ -79,10 +69,12 @@ impl DiskCollector {
                 )));
             }
 
-            // The same guard as the Unix branch: `free_bytes` comes from the platform and is not guaranteed to
-            // be at most `total_bytes`, so the subtraction saturates rather than wrapping.
-            let used = total_bytes.saturating_sub(free_bytes);
-            let usage_percent = super::usage_percent(used, total_bytes);
+            let used = total_bytes - free_bytes;
+            let usage_percent = if total_bytes > 0 {
+                (used as f64 / total_bytes as f64 * 100.0) as f32
+            } else {
+                0.0
+            };
 
             Ok(DiskInfo {
                 total: total_bytes,
@@ -128,7 +120,6 @@ impl DiskCollector {
         let path = CString::new(mount_point)
             .map_err(|e| MonitorError::InvalidData(format!("Invalid path: {}", e)))?;
 
-        // SAFETY: `path` is a live NUL-terminated CString and `statvfs` is valid writable storage for libc.
         unsafe {
             let mut statvfs: libc::statvfs = mem::zeroed();
             if libc::statvfs(path.as_ptr(), &mut statvfs) != 0 {
@@ -138,22 +129,19 @@ impl DiskCollector {
                 )));
             }
 
-            // libc exposes these fields as different unsigned widths across
-            // Unix targets (u64 on Linux, u32 for block counts on macOS ARM).
-            // Normalize before doing byte arithmetic and building DiskInfo.
-            let block_size = normalize_unix_unsigned(statvfs.f_frsize);
-            let total_blocks = normalize_unix_unsigned(statvfs.f_blocks);
-            let free_blocks = normalize_unix_unsigned(statvfs.f_bavail);
+            let block_size = statvfs.f_frsize;
+            let total_blocks = statvfs.f_blocks;
+            let free_blocks = statvfs.f_bavail;
 
             let total = total_blocks * block_size;
             let available = free_blocks * block_size;
-            // `saturating_sub`, because `f_bavail > f_blocks` is possible: `f_bavail` counts blocks available
-            // to an unprivileged process, and a filesystem with reserved blocks or a container overlay can
-            // report more available than total. The plain subtraction underflowed to a value near `u64::MAX`,
-            // which then produced a usage percentage far above 100 and a nonsensical "used" figure.
-            let used = total.saturating_sub(available);
+            let used = total - available;
 
-            let usage_percent = super::usage_percent(used, total);
+            let usage_percent = if total > 0 {
+                (used as f64 / total as f64 * 100.0) as f32
+            } else {
+                0.0
+            };
 
             Ok(DiskInfo {
                 total,

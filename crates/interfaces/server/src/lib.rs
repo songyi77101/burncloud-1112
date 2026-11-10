@@ -1,13 +1,6 @@
 pub mod api;
-mod local_routes;
 pub mod logging;
-mod model_selection;
 pub mod node_attachment;
-#[expect(
-    clippy::expect_used,
-    clippy::too_many_lines,
-    reason = "node_orchestrator is a legacy state machine whose mutable workload lookups rely on the invariant that each demand is inserted before transition handling; keep the debt explicit until that state machine is decomposed"
-)]
 pub mod node_orchestrator;
 pub mod node_request;
 pub mod node_test;
@@ -16,15 +9,13 @@ pub use api::auth::{auth_middleware, Claims};
 use axum::http::HeaderName;
 use axum::{middleware, routing::get, Router};
 use burncloud_database::{create_default_database, Database};
+use burncloud_database_router::RouterDatabase;
+use burncloud_database_user::UserDatabase;
 use burncloud_node_runtime::{NodeContext, NodeRuntime};
 use burncloud_router::create_router_app_with_route_miss;
-use burncloud_router::local_attachment::LocalRouteManager;
 use burncloud_router::price_sync::SyncResult;
-use burncloud_router::RouterDatabase;
 use burncloud_service_monitor::SystemMonitorService;
-use burncloud_service_user::UserDatabase;
 use burncloud_service_user::{JwtSecret, UserService};
-use burncloud_supply_channel::ChannelProtocolConfigModel;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -86,24 +77,6 @@ pub struct AppState {
     pub data_plane: Router,
 }
 
-/// 构建统一网关，将模型选择接口、管理 API 和可选 LiveView 挂到同一服务。
-///
-/// # Examples
-/// ```no_run
-/// # use std::sync::Arc;
-/// # use burncloud_database::Database;
-/// # use burncloud_service_user::JwtSecret;
-/// # use burncloud_server::{create_app, InternalSecret};
-/// # async fn example(db: Arc<Database>, jwt: JwtSecret, secret: InternalSecret) -> anyhow::Result<()> {
-/// let app = create_app(db, false, jwt, secret).await?;
-/// // 即使关闭 LiveView，模型选择三个接口仍由该 Router 提供。
-/// # drop(app);
-/// # Ok(())
-/// # }
-/// ```
-///
-/// # Notes
-/// 本函数不额外绑定模型服务端口；资源页面可访问不表示模型已下载或已部署。
 #[tracing::instrument(skip(db))]
 pub async fn create_app(
     db: Arc<Database>,
@@ -130,11 +103,8 @@ pub async fn create_app_with_node_request_state(
     node_request_state: node_request::NodeRequestState,
 ) -> anyhow::Result<Router> {
     let monitor = Arc::new(SystemMonitorService::new());
-    // Auto collection is auxiliary to serving traffic. Keep startup available
-    // if it cannot start, but make the degraded observability state explicit.
-    if let Err(error) = monitor.start_auto_update().await {
-        tracing::warn!(%error, "system monitor auto-update failed to start");
-    }
+    // Start auto collection in background
+    let _ = monitor.start_auto_update().await;
 
     // Keep the Node runtime and its request-visible status alive with the server.
     let node_context = NodeRuntime::new().start();
@@ -172,7 +142,6 @@ pub async fn create_app_with_node_request_state(
     let mut app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .merge(api_router)
-        .merge(model_selection::routes()?)
         .merge(internal_app);
 
     if enable_liveview {
@@ -216,28 +185,8 @@ pub async fn create_app_with_node_request_state(
     Ok(app)
 }
 
-/// 启动统一网关，并在同一生命周期内管理配置的本机路由挂载。
-///
-/// # Examples
-/// ```no_run
-/// # async fn example() -> anyhow::Result<()> {
-/// // 需预先配置 JWT_SECRET 与 BURNCLOUD_INTERNAL_SECRET。
-/// burncloud_server::start_server("127.0.0.1", 3000, false).await?;
-/// # Ok(()) }
-/// ```
-///
-/// # Notes
-/// `BURNCLOUD_LOCAL_ROUTE_ATTACHMENTS` 为仅含 `model`/`base_url` 的 JSON 数组；
-/// 也可使用 `BURNCLOUD_LOCAL_ROUTE_DEPLOYMENTS` 导入一个部署结果对象或数组，
-/// 必须包含 `model_id`、`endpoint`、`status="ready"` 和 `state="Ready"`，
-/// `error` 只能缺省或为 null。两项配置互斥；均未设置或唯一来源为 `[]` 时不创建挂载。
-/// 全量校验先于探测与挂载。部署 Ready、PID、历史心跳和事件不能代替当前端点的
-/// `/v1/models` 直接探测，也不改变认证、计费或模型报价。
-/// 取消本 future 同步关闭本机挂载准入，不自动删除持久化记录；重启残留须核对后
-/// 显式 detach。低层 `create_app` 不读取这两项配置，也不启动管理器。
 #[tracing::instrument(skip_all)]
 pub async fn start_server(host: &str, port: u16, enable_liveview: bool) -> anyhow::Result<()> {
-    let attachments = local_routes::configured_attachments()?;
     let node_test_api_enabled = node_test::enabled_from_env();
     node_test::validate_bind_host(host, node_test_api_enabled)?;
 
@@ -251,16 +200,8 @@ pub async fn start_server(host: &str, port: u16, enable_liveview: bool) -> anyho
     let db = create_default_database().await?;
     RouterDatabase::init(&db).await?;
     UserDatabase::init(&db).await?;
-    // Domain-owned default records (#842). Platform only creates schema and historic
-    // fixups; Identity owns the demo account plus demo API key and Supply owns the default
-    // protocol configs, so the application bootstrap seeds them here, in the order the
-    // records depend on: account before the key that references it. Both owner calls are
-    // idempotent, so a restart over an existing database inserts nothing.
-    UserDatabase::seed_demo_defaults(&db).await?;
-    ChannelProtocolConfigModel::seed_default_protocol_configs(&db).await?;
     let db = Arc::new(db);
 
-    let manager = LocalRouteManager::new(db.clone(), attachments)?;
     let app = create_app(db, enable_liveview, jwt_secret, internal_secret).await?;
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -271,11 +212,7 @@ pub async fn start_server(host: &str, port: u16, enable_liveview: bool) -> anyho
     tracing::info!("- LLM API:   http://{}:{}/v1/...", host, port);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    // 两个 future 由启动入口直接持有，退出/取消会回收首检，不遗留脱离的挂载任务。
-    tokio::select! {
-        result = async { axum::serve(listener, app).await } => result?,
-        result = manager.run() => result?,
-    }
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

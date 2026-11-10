@@ -1,9 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::unnecessary_unwrap,
-    reason = "Test-only file: the assertions and unwraps are the test."
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unnecessary_unwrap)]
 use burncloud_database::{create_default_database, Database, Result};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -30,7 +25,7 @@ async fn test_database_creation_performance() {
                 creation_time
             );
 
-            db.close().await.ok();
+            let _ = db.close().await;
         }
         Ok(Err(e)) => {
             println!(
@@ -51,9 +46,9 @@ async fn test_concurrent_database_access() {
 
     if let Ok(db) = db_result {
         // Create test table
-        db.execute_query(
+        let _ = db.execute_query(
             "CREATE TABLE IF NOT EXISTS concurrent_test (id INTEGER PRIMARY KEY, thread_id INTEGER, timestamp TEXT)"
-        ).await.ok();
+        ).await;
 
         // Spawn multiple concurrent tasks
         let mut handles = vec![];
@@ -94,10 +89,7 @@ async fn test_concurrent_database_access() {
 
         // Verify all data was inserted
         #[derive(sqlx::FromRow)]
-        #[allow(
-            dead_code,
-            reason = "the row mirrors the SQL columns; not every field is read"
-        )]
+        #[allow(dead_code)]
         struct ConcurrentRow {
             id: i64,
             thread_id: i64,
@@ -114,7 +106,7 @@ async fn test_concurrent_database_access() {
             );
         }
 
-        db.close().await.ok();
+        let _ = db.close().await;
     } else {
         println!("Database creation failed, skipping concurrent test");
     }
@@ -127,9 +119,9 @@ async fn test_large_dataset_operations() {
 
     if let Ok(db) = db_result {
         // Create test table
-        db.execute_query(
+        let _ = db.execute_query(
             "CREATE TABLE IF NOT EXISTS performance_test (id INTEGER PRIMARY KEY, data TEXT, number INTEGER)"
-        ).await.ok();
+        ).await;
 
         let start_time = Instant::now();
         let num_records = 1000; // Reasonable size for integration testing
@@ -196,7 +188,7 @@ async fn test_large_dataset_operations() {
             );
         }
 
-        db.close().await.ok();
+        let _ = db.close().await;
     } else {
         println!("Database creation failed, skipping performance test");
     }
@@ -216,7 +208,7 @@ async fn test_database_initialization_performance() {
 
         if let Ok(db) = result {
             initialized_times.push(elapsed);
-            db.close().await.ok();
+            let _ = db.close().await;
         }
     }
 
@@ -242,7 +234,7 @@ async fn test_database_initialization_performance() {
 
         if let Ok(db) = result {
             convenience_times.push(elapsed);
-            db.close().await.ok();
+            let _ = db.close().await;
         }
     }
 
@@ -279,10 +271,10 @@ async fn test_memory_usage_stability() {
             let drop_query = format!("DROP TABLE {}", table_name);
 
             // These operations should all complete without issues
-            db.execute_query(&create_query).await.ok();
-            db.execute_query(&insert_query).await.ok();
-            db.fetch_one::<(i64,)>(&select_query).await.ok();
-            db.execute_query(&drop_query).await.ok();
+            let _ = db.execute_query(&create_query).await;
+            let _ = db.execute_query(&insert_query).await;
+            let _ = db.fetch_one::<(i64,)>(&select_query).await;
+            let _ = db.execute_query(&drop_query).await;
 
             // Occasional checks to ensure the database is still responsive
             if i % 25 == 0 {
@@ -296,7 +288,7 @@ async fn test_memory_usage_stability() {
 
         println!("✓ Completed 100 repeated operations without issues");
 
-        db.close().await.ok();
+        let _ = db.close().await;
     } else {
         println!("Database creation failed, skipping memory stability test");
     }
@@ -319,7 +311,7 @@ async fn test_rapid_database_creation_and_destruction() {
                 success_count += 1;
             }
 
-            db.close().await.ok();
+            let _ = db.close().await;
         }
 
         let cycle_time = start.elapsed();
@@ -341,10 +333,7 @@ async fn test_rapid_database_creation_and_destruction() {
 }
 
 // Helper function for tests
-#[allow(
-    dead_code,
-    reason = "kept as a path-resolution reference for the tests above"
-)]
+#[allow(dead_code)]
 fn get_test_default_path() -> Result<std::path::PathBuf> {
     use burncloud_database::DatabaseError;
     use std::path::PathBuf;

@@ -140,7 +140,7 @@ impl AffinityCache {
 /// zero health.
 pub fn pick_hrw<F>(
     key: &str,
-    candidates: &[(burncloud_supply_contracts::Channel, i32)],
+    candidates: &[(burncloud_common::types::Channel, i32)],
     health_of: F,
 ) -> Option<i32>
 where
@@ -172,10 +172,7 @@ fn mix_hash(key: &str, channel_id: i32) -> u64 {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "unit-test module: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
-)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::scheduler::tests::make_channel;

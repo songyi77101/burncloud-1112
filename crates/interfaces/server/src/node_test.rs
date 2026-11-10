@@ -1,12 +1,3 @@
-#![allow(
-    clippy::disallowed_types,
-    reason = "This module is the node test API: a diagnostic surface whose whole job is to report and \
-              accept loosely structured JSON. `clippy.toml` allows dynamic JSON at explicit \
-              protocol/adaptor boundaries, and this is one -- the handlers echo model state, evidence \
-              and errors whose shape is the API contract rather than a domain type. The rule is \
-              enforced everywhere else in the workspace, including the test module below."
-)]
-
 use crate::node_attachment::{
     begin_detached_route_recovery, detach_unhealthy_node_route, prepare_and_attach_node_route,
     DetachedRoute, LocalRouteOutcome,
@@ -21,7 +12,7 @@ use burncloud_node_runtime::{
     FakeReadinessProbe, FakeRuntimeAdapter, FakeRuntimePreparer, NodeComposition, NodeState,
 };
 use burncloud_router::local_attachment::LocalRouteAttachmentId;
-use burncloud_supply_model::FakeModelResolver;
+use burncloud_service_models::FakeModelResolver;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};

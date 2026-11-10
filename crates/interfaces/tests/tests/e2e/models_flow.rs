@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "e2e browser tests: unwrap/expect are the intended failure signal and these pedantic lints add no value in ignored, manually-run UI tests"
+    clippy::redundant_pattern_matching
 )]
 use super::*;
 
@@ -27,7 +26,7 @@ async fn test_models_page_loads() {
     browser
         .wait_for_text("模型网络", 10_000)
         .expect("Models page did not load");
-    browser.screenshot("models-page").ok();
+    let _ = browser.screenshot("models-page");
 }
 
 /// Test: Filter channels by status (All)
@@ -46,13 +45,12 @@ async fn test_models_filter_all() {
         .expect("Models page did not load");
 
     // Click "全部" or "All" filter button
-    browser
+    let _ = browser
         .click_by_name("button:全部", 3_000)
-        .or_else(|_| browser.click_by_name("button:All", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:All", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
-    browser.screenshot("models-filter-all").ok();
+    let _ = browser.screenshot("models-filter-all");
 }
 
 /// Test: Filter channels by status (OK)
@@ -71,13 +69,12 @@ async fn test_models_filter_ok() {
         .expect("Models page did not load");
 
     // Click "正常" or "OK" filter button
-    browser
+    let _ = browser
         .click_by_name("button:正常", 3_000)
-        .or_else(|_| browser.click_by_name("button:OK", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:OK", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
-    browser.screenshot("models-filter-ok").ok();
+    let _ = browser.screenshot("models-filter-ok");
 }
 
 /// Test: Filter channels by status (Throttle)
@@ -96,13 +93,12 @@ async fn test_models_filter_throttle() {
         .expect("Models page did not load");
 
     // Click "限流" or "Throttle" filter button
-    browser
+    let _ = browser
         .click_by_name("button:限流", 3_000)
-        .or_else(|_| browser.click_by_name("button:Throttle", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:Throttle", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
-    browser.screenshot("models-filter-throttle").ok();
+    let _ = browser.screenshot("models-filter-throttle");
 }
 
 /// Test: Filter channels by status (Down)
@@ -121,13 +117,12 @@ async fn test_models_filter_down() {
         .expect("Models page did not load");
 
     // Click "停用" or "Down" filter button
-    browser
+    let _ = browser
         .click_by_name("button:停用", 3_000)
-        .or_else(|_| browser.click_by_name("button:Down", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:Down", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
-    browser.screenshot("models-filter-down").ok();
+    let _ = browser.screenshot("models-filter-down");
 }
 
 /// Test: Filter channels by status (Maintenance)
@@ -146,13 +141,12 @@ async fn test_models_filter_maintenance() {
         .expect("Models page did not load");
 
     // Click "维护" or "Maintenance" filter button
-    browser
+    let _ = browser
         .click_by_name("button:维护", 3_000)
-        .or_else(|_| browser.click_by_name("button:Maintenance", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:Maintenance", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
-    browser.screenshot("models-filter-maintenance").ok();
+    let _ = browser.screenshot("models-filter-maintenance");
 }
 
 /// Test: Open create channel modal
@@ -171,11 +165,10 @@ async fn test_models_open_create_modal() {
         .expect("Models page did not load");
 
     // Click "创建" or "添加" button
-    browser
+    let _ = browser
         .click_by_name("button:创建", 5_000)
         .or_else(|_| browser.click_by_name("button:添加", 3_000))
-        .or_else(|_| browser.click_by_name("button:Create", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:Create", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
@@ -188,7 +181,7 @@ async fn test_models_open_create_modal() {
         "Create channel modal should open with provider selection"
     );
 
-    browser.screenshot("models-create-modal").ok();
+    let _ = browser.screenshot("models-create-modal");
 }
 
 /// Test: Select provider in create modal (OpenAI)
@@ -207,15 +200,14 @@ async fn test_models_select_provider_openai() {
         .expect("Models page did not load");
 
     // Open create modal first
-    browser
+    let _ = browser
         .click_by_name("button:创建", 5_000)
-        .or_else(|_| browser.click_by_name("button:添加", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:添加", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
     // Select OpenAI provider
-    browser.click_by_name("button:OpenAI", 3_000).ok();
+    let _ = browser.click_by_name("button:OpenAI", 3_000);
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -228,7 +220,7 @@ async fn test_models_select_provider_openai() {
         "Channel configuration form should appear after selecting provider"
     );
 
-    browser.screenshot("models-provider-openai").ok();
+    let _ = browser.screenshot("models-provider-openai");
 }
 
 /// Test: Close create modal with Cancel button
@@ -247,18 +239,16 @@ async fn test_models_close_create_modal() {
         .expect("Models page did not load");
 
     // Open create modal first
-    browser
+    let _ = browser
         .click_by_name("button:创建", 5_000)
-        .or_else(|_| browser.click_by_name("button:添加", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:添加", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
     // Close modal with Cancel button
-    browser
+    let _ = browser
         .click_by_name("button:取消", 3_000)
-        .or_else(|_| browser.click_by_name("button:Cancel", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:Cancel", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -269,7 +259,7 @@ async fn test_models_close_create_modal() {
         "Modal should be closed after clicking Cancel"
     );
 
-    browser.screenshot("models-modal-closed").ok();
+    let _ = browser.screenshot("models-modal-closed");
 }
 
 /// Test: Restart/Refresh channel list
@@ -288,14 +278,13 @@ async fn test_models_restart_channels() {
         .expect("Models page did not load");
 
     // Click "筛选" or "Filter" or "重启" button
-    browser
+    let _ = browser
         .click_by_name("button:筛选", 3_000)
         .or_else(|_| browser.click_by_name("button:Filter", 3_000))
-        .or_else(|_| browser.click_by_name("button:重启", 3_000))
-        .ok();
+        .or_else(|_| browser.click_by_name("button:重启", 3_000));
 
     std::thread::sleep(std::time::Duration::from_millis(1000));
-    browser.screenshot("models-restart").ok();
+    let _ = browser.screenshot("models-restart");
 }
 
 /// Test: Channel list table rendering
@@ -333,5 +322,5 @@ async fn test_models_table_rendering() {
         );
     }
 
-    browser.screenshot("models-table").ok();
+    let _ = browser.screenshot("models-table");
 }

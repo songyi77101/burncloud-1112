@@ -1,17 +1,15 @@
-#![allow(
-    clippy::disallowed_types,
-    reason = "CLI command output parsing of HTTP response JSON requires Value; no feasible typed alternative"
-)]
+// CLI command output parsing — HTTP response JSON — Value required; no feasible typed alternative.
+#![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
 use bcrypt::{hash, verify, DEFAULT_COST};
 use burncloud_database::Database;
-use burncloud_service_user::{UserAccount, UserDatabase};
+use burncloud_database_user::{UserAccount, UserDatabase};
 use clap::ArgMatches;
 use uuid::Uuid;
 
 /// Handle user login command
-pub(crate) async fn cmd_user_login(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_user_login(db: &Database, matches: &ArgMatches) -> Result<()> {
     let username = matches
         .get_one::<String>("username")
         .ok_or_else(|| anyhow::anyhow!("username argument is required"))?;
@@ -88,7 +86,7 @@ pub(crate) async fn cmd_user_login(db: &Database, matches: &ArgMatches) -> Resul
 }
 
 /// Handle user register command
-pub(crate) async fn cmd_user_register(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_user_register(db: &Database, matches: &ArgMatches) -> Result<()> {
     let username = matches
         .get_one::<String>("username")
         .ok_or_else(|| anyhow::anyhow!("username argument is required"))?;
@@ -137,7 +135,7 @@ pub(crate) async fn cmd_user_register(db: &Database, matches: &ArgMatches) -> Re
 }
 
 /// Handle user list command
-pub(crate) async fn cmd_user_list(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_user_list(db: &Database, matches: &ArgMatches) -> Result<()> {
     let limit: i64 = matches
         .get_one::<String>("limit")
         .and_then(|s| s.parse().ok())
@@ -215,7 +213,7 @@ pub(crate) async fn cmd_user_list(db: &Database, matches: &ArgMatches) -> Result
 }
 
 /// Handle user recharges command
-pub(crate) async fn cmd_user_recharges(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_user_recharges(db: &Database, matches: &ArgMatches) -> Result<()> {
     let user_id = matches
         .get_one::<String>("user-id")
         .ok_or_else(|| anyhow::anyhow!("user-id argument is required"))?;
@@ -270,7 +268,7 @@ pub(crate) async fn cmd_user_recharges(db: &Database, matches: &ArgMatches) -> R
 }
 
 /// Handle user check-username command
-pub(crate) async fn cmd_user_check_username(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_user_check_username(db: &Database, matches: &ArgMatches) -> Result<()> {
     let username = matches
         .get_one::<String>("username")
         .ok_or_else(|| anyhow::anyhow!("username argument is required"))?;
@@ -288,7 +286,7 @@ pub(crate) async fn cmd_user_check_username(db: &Database, matches: &ArgMatches)
 }
 
 /// Handle user topup command
-pub(crate) async fn cmd_user_topup(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn cmd_user_topup(db: &Database, matches: &ArgMatches) -> Result<()> {
     let user_id = matches
         .get_one::<String>("user-id")
         .ok_or_else(|| anyhow::anyhow!("user-id argument is required"))?;
@@ -329,7 +327,7 @@ pub(crate) async fn cmd_user_topup(db: &Database, matches: &ArgMatches) -> Resul
     let amount_nano = (amount_dollar * 1_000_000_000.0) as i64;
 
     // Create recharge record (this also updates the balance)
-    let recharge = burncloud_service_user::UserRecharge {
+    let recharge = burncloud_database_user::UserRecharge {
         id: 0, // Auto-generated
         user_id: user_id.clone(),
         amount: amount_nano,
@@ -359,7 +357,7 @@ pub(crate) async fn cmd_user_topup(db: &Database, matches: &ArgMatches) -> Resul
 }
 
 /// Route user commands
-pub(crate) async fn handle_user_command(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn handle_user_command(db: &Database, matches: &ArgMatches) -> Result<()> {
     // Ensure user tables (user_roles, user_role_bindings, user_recharges) exist
     UserDatabase::init(db).await?;
 

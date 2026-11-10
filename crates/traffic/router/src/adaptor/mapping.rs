@@ -1,8 +1,5 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(
-    clippy::disallowed_types,
-    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
-)]
+#![allow(clippy::disallowed_types)]
 
 //! Protocol Mapping Module
 //!
@@ -16,7 +13,7 @@ use std::collections::HashMap;
 
 /// Request mapping configuration for protocol adaptation
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct RequestMapping {
+pub struct RequestMapping {
     /// Field mappings: "target_field" => "source_field"
     /// Example: {"input": "messages"} means copy "messages" field to "input"
     #[serde(default)]
@@ -35,20 +32,14 @@ pub(crate) struct RequestMapping {
 
 impl RequestMapping {
     /// Create an empty request mapping
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn new() -> Self {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Create a request mapping with field map
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn with_field_map(field_map: HashMap<String, String>) -> Self {
+    #[allow(dead_code)]
+    pub fn with_field_map(field_map: HashMap<String, String>) -> Self {
         Self {
             field_map,
             ..Default::default()
@@ -56,11 +47,8 @@ impl RequestMapping {
     }
 
     /// Add a field mapping
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn add_field_mapping(
+    #[allow(dead_code)]
+    pub fn add_field_mapping(
         mut self,
         target: impl Into<String>,
         source: impl Into<String>,
@@ -70,21 +58,15 @@ impl RequestMapping {
     }
 
     /// Add a field rename
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn add_rename(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub fn add_rename(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.rename.insert(from.into(), to.into());
         self
     }
 
     /// Add a fixed field
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn add_fixed_field(mut self, key: impl Into<String>, value: Value) -> Self {
+    #[allow(dead_code)]
+    pub fn add_fixed_field(mut self, key: impl Into<String>, value: Value) -> Self {
         self.add_fields.insert(key.into(), value);
         self
     }
@@ -92,7 +74,7 @@ impl RequestMapping {
 
 /// Response mapping configuration for protocol adaptation
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct ResponseMapping {
+pub struct ResponseMapping {
     /// Path to extract content from response
     /// Example: "choices[0].message.content" or "output.text"
     pub content_path: Option<String>,
@@ -108,20 +90,14 @@ pub(crate) struct ResponseMapping {
 
 impl ResponseMapping {
     /// Create an empty response mapping
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn new() -> Self {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Create a response mapping with content path
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn with_content_path(path: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub fn with_content_path(path: impl Into<String>) -> Self {
         Self {
             content_path: Some(path.into()),
             ..Default::default()
@@ -129,31 +105,22 @@ impl ResponseMapping {
     }
 
     /// Set content path
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn content_path(mut self, path: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub fn content_path(mut self, path: impl Into<String>) -> Self {
         self.content_path = Some(path.into());
         self
     }
 
     /// Set usage path
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn usage_path(mut self, path: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub fn usage_path(mut self, path: impl Into<String>) -> Self {
         self.usage_path = Some(path.into());
         self
     }
 
     /// Set error path
-    #[allow(
-        dead_code,
-        reason = "builder helper kept for programmatic construction; configs arrive via serde instead"
-    )]
-    pub(crate) fn error_path(mut self, path: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub fn error_path(mut self, path: impl Into<String>) -> Self {
         self.error_path = Some(path.into());
         self
     }
@@ -165,7 +132,7 @@ impl ResponseMapping {
 /// 1. Apply field mappings (copy fields from source to target)
 /// 2. Apply field renames
 /// 3. Add fixed fields
-pub(crate) fn apply_mapping(json: &mut Value, mapping: &RequestMapping) {
+pub fn apply_mapping(json: &mut Value, mapping: &RequestMapping) {
     if !mapping.field_map.is_empty() || !mapping.rename.is_empty() || !mapping.add_fields.is_empty()
     {
         if let Some(obj) = json.as_object_mut() {
@@ -211,7 +178,7 @@ pub(crate) fn apply_mapping(json: &mut Value, mapping: &RequestMapping) {
 /// - Nested access: "object.field"
 /// - Array index access: "array[0]"
 /// - Combined: "choices[0].message.content"
-pub(crate) fn extract_value<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
+pub fn extract_value<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
     let parts = parse_path(path);
     let mut current = json;
 
@@ -226,11 +193,8 @@ pub(crate) fn extract_value<'a>(json: &'a Value, path: &str) -> Option<&'a Value
 }
 
 /// Extract a value from JSON using a path expression (owned version)
-#[allow(
-    dead_code,
-    reason = "part of the mapping helper surface; callers currently use the borrowed variant"
-)]
-pub(crate) fn extract_value_owned(json: &Value, path: &str) -> Option<Value> {
+#[allow(dead_code)]
+pub fn extract_value_owned(json: &Value, path: &str) -> Option<Value> {
     extract_value(json, path).cloned()
 }
 
@@ -285,20 +249,14 @@ enum PathPart {
 }
 
 /// Extract usage information from a response
-#[allow(
-    dead_code,
-    reason = "protocol-mapping entry point retained for adaptors that read usage via a configured path"
-)]
-pub(crate) fn extract_usage(json: &Value, usage_path: &str) -> Option<Value> {
+#[allow(dead_code)]
+pub fn extract_usage(json: &Value, usage_path: &str) -> Option<Value> {
     extract_value_owned(json, usage_path)
 }
 
 /// Extract error message from a response
-#[allow(
-    dead_code,
-    reason = "protocol-mapping entry point retained for adaptors that read errors via a configured path"
-)]
-pub(crate) fn extract_error(json: &Value, error_path: &str) -> Option<String> {
+#[allow(dead_code)]
+pub fn extract_error(json: &Value, error_path: &str) -> Option<String> {
     extract_value(json, error_path)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -311,8 +269,7 @@ pub(crate) fn extract_error(json: &Value, error_path: &str) -> Option<String> {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    reason = "test module: fail-fast assertions on router fixtures"
+    clippy::redundant_pattern_matching
 )]
 mod tests {
     use super::*;

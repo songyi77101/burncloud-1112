@@ -1,9 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::unnecessary_unwrap,
-    reason = "Test-only file: the assertions and unwraps are the test."
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unnecessary_unwrap)]
 use burncloud_database::{create_default_database, Database, DatabaseError, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -19,9 +14,7 @@ async fn test_create_default_database_end_to_end() {
     match result {
         Ok(db) => {
             // Clean up any existing test data from previous runs
-            db.execute_query("DROP TABLE IF EXISTS test_table")
-                .await
-                .ok();
+            let _ = db.execute_query("DROP TABLE IF EXISTS test_table").await;
 
             // Verify the database is functional by performing operations
             let create_result = db
@@ -41,10 +34,7 @@ async fn test_create_default_database_end_to_end() {
 
             // Verify data can be retrieved
             #[derive(sqlx::FromRow)]
-            #[allow(
-                dead_code,
-                reason = "the row mirrors the SQL columns; not every field is read"
-            )]
+            #[allow(dead_code)]
             struct TestRow {
                 id: i64,
                 name: String,
@@ -60,7 +50,7 @@ async fn test_create_default_database_end_to_end() {
             );
 
             // Clean up
-            db.close().await.ok();
+            let _ = db.close().await;
         }
         Err(e) => {
             // In environments where file database creation might fail,
@@ -103,7 +93,7 @@ async fn test_database_initialization_patterns() {
             let query_result = db.execute_query("SELECT 1 as test").await;
             assert!(query_result.is_ok(), "Should be able to execute queries");
 
-            db.close().await.ok();
+            let _ = db.close().await;
         }
         Err(e) => {
             println!(
@@ -119,7 +109,7 @@ async fn test_database_initialization_patterns() {
         Ok(db) => {
             let query_result = db.execute_query("SELECT 1 as test").await;
             assert!(query_result.is_ok(), "Convenience function should work");
-            db.close().await.ok();
+            let _ = db.close().await;
         }
         Err(e) => {
             println!(
@@ -192,11 +182,11 @@ async fn test_directory_creation_and_permissions() {
 
                     if write_result.is_ok() {
                         // Clean up test file
-                        fs::remove_file(&test_file).ok();
+                        let _ = fs::remove_file(&test_file);
                     }
 
                     // Clean up
-                    db.close().await.ok();
+                    let _ = db.close().await;
                 }
             }
         }
@@ -225,8 +215,8 @@ async fn test_multiple_database_instances() {
             assert!(result2.is_ok(), "Second database should be functional");
 
             // Clean up
-            db1.close().await.ok();
-            db2.close().await.ok();
+            let _ = db1.close().await;
+            let _ = db2.close().await;
         }
         _ => {
             println!("Multiple database creation failed (acceptable in some environments)");
@@ -257,7 +247,7 @@ async fn test_database_persistence() {
                 .await;
 
             if insert_result.is_ok() {
-                db1.close().await.ok();
+                let _ = db1.close().await;
 
                 // Create second database instance and verify data exists
                 let db2_result = Database::new().await;
@@ -279,7 +269,7 @@ async fn test_database_persistence() {
                         println!("✓ Data persistence verified");
                     }
 
-                    db2.close().await.ok();
+                    let _ = db2.close().await;
                 }
             }
         }
@@ -299,7 +289,7 @@ async fn test_backward_compatibility() {
             query_result.is_ok(),
             "Default database should be functional"
         );
-        default_db.close().await.ok();
+        let _ = default_db.close().await;
     }
 
     // Test that multiple database instances work independently
@@ -312,8 +302,8 @@ async fn test_backward_compatibility() {
             let query2 = db2.execute_query("SELECT 1 as test").await;
             assert!(query1.is_ok(), "First database should be functional");
             assert!(query2.is_ok(), "Second database should be functional");
-            db1.close().await.ok();
-            db2.close().await.ok();
+            let _ = db1.close().await;
+            let _ = db2.close().await;
         }
         _ => {
             println!("Multiple database creation scenarios tested (some failures acceptable in test environments)");
@@ -378,7 +368,7 @@ async fn test_api_consistency() {
         Ok(default_db) => {
             // Should be initialized and functional
             println!("✓ Default database created and initialized successfully");
-            default_db.close().await.ok();
+            let _ = default_db.close().await;
         }
         Err(e) => {
             println!("Default database creation failed (acceptable): {}", e);
@@ -390,7 +380,7 @@ async fn test_api_consistency() {
     match convenience_result {
         Ok(default_db) => {
             println!("✓ Convenience function works consistently");
-            default_db.close().await.ok();
+            let _ = default_db.close().await;
         }
         Err(e) => {
             println!("Convenience function failed (acceptable): {}", e);

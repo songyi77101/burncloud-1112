@@ -1,30 +1,21 @@
 use burncloud_node_runtime::{
-    ArtifactPreparer, ArtifactRequest, ArtifactSource, Digest, FakeArtifactPreparer,
-    FakeHealthProbe, FakeReadinessProbe, FakeRuntimePreparer, HealthProbe, ReadinessProbe,
-    ReadinessTarget, RuntimePreparer, RuntimeRequest,
+    ArtifactPreparer, ArtifactRequest, FakeArtifactPreparer, FakeHealthProbe, FakeReadinessProbe,
+    FakeRuntimePreparer, HealthProbe, ReadinessProbe, ReadinessTarget, RuntimePreparer,
+    RuntimeRequest,
 };
 
 #[tokio::test]
 async fn fake_artifact_preparer_returns_verified_local_artifact() {
     let artifact = FakeArtifactPreparer
-        .prepare(ArtifactRequest::new(
-            ArtifactSource::parse("models/qwen-4b.gguf").unwrap(),
-            Some(
-                Digest::parse(
-                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                )
-                .unwrap(),
-            ),
-        ))
+        .prepare(ArtifactRequest {
+            source: "models/qwen-4b.gguf".into(),
+            expected_digest: Some("sha256:fake".into()),
+        })
         .await
         .unwrap();
 
-    assert!(artifact.is_verified());
-    assert!(artifact.local_path().is_absolute());
-    assert!(artifact
-        .local_path()
-        .to_string_lossy()
-        .contains("burncloud"));
+    assert!(artifact.verified);
+    assert!(artifact.local_path.starts_with("/fake/artifacts/"));
 }
 
 #[tokio::test]

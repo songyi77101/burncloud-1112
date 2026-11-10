@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "e2e browser tests: unwrap/expect are the intended failure signal and these pedantic lints add no value in ignored, manually-run UI tests"
+    clippy::redundant_pattern_matching
 )]
 use super::*;
 
@@ -26,7 +25,7 @@ async fn test_dashboard_loads() {
         .or_else(|_| browser.wait_for_text("仪表盘", 5_000))
         .or_else(|_| browser.wait_for_text("gpt-4o-mini", 5_000))
         .expect("Dashboard page did not load (no heading, sidebar, or table data found)");
-    browser.screenshot("console-dashboard").ok();
+    let _ = browser.screenshot("console-dashboard");
 }
 
 #[tokio::test]
@@ -41,7 +40,7 @@ async fn test_models_page_loads() {
     browser
         .wait_for_text("模型网络", 10_000)
         .expect("Models page did not load");
-    browser.screenshot("console-models").ok();
+    let _ = browser.screenshot("console-models");
 }
 
 #[tokio::test]
@@ -56,7 +55,7 @@ async fn test_access_page_loads() {
     browser
         .wait_for_text("访问凭证", 10_000)
         .expect("Access page did not load");
-    browser.screenshot("console-access").ok();
+    let _ = browser.screenshot("console-access");
 }
 
 #[tokio::test]
@@ -71,7 +70,7 @@ async fn test_deploy_page_loads() {
     browser
         .wait_for_text("Model Deployment", 10_000)
         .expect("Deploy page did not load");
-    browser.screenshot("console-deploy").ok();
+    let _ = browser.screenshot("console-deploy");
 }
 
 #[tokio::test]
@@ -86,7 +85,7 @@ async fn test_monitor_page_loads() {
     browser
         .wait_for_text("风控雷达", 10_000)
         .expect("Monitor page did not load");
-    browser.screenshot("console-monitor").ok();
+    let _ = browser.screenshot("console-monitor");
 }
 
 #[tokio::test]
@@ -101,7 +100,7 @@ async fn test_logs_page_loads() {
         .wait_for_text("Logs", 20_000)
         .or_else(|_| browser.wait_for_text("日志审查", 5_000))
         .expect("Logs page did not load");
-    browser.screenshot("console-logs").ok();
+    let _ = browser.screenshot("console-logs");
 }
 
 #[tokio::test]
@@ -119,7 +118,7 @@ async fn test_users_page_loads() {
         .wait_for_text("客户列表", 20_000)
         .or_else(|_| browser.wait_for_text("用户管理", 5_000))
         .expect("Users page did not load");
-    browser.screenshot("console-users").ok();
+    let _ = browser.screenshot("console-users");
 }
 
 #[tokio::test]
@@ -134,7 +133,7 @@ async fn test_settings_page_loads() {
     browser
         .wait_for_text("系统设置", 10_000)
         .expect("Settings page did not load");
-    browser.screenshot("console-settings").ok();
+    let _ = browser.screenshot("console-settings");
 }
 
 #[tokio::test]
@@ -149,7 +148,7 @@ async fn test_billing_page_loads() {
     browser
         .wait_for_text("财务中心", 10_000)
         .expect("Finance page did not load");
-    browser.screenshot("console-finance").ok();
+    let _ = browser.screenshot("console-finance");
 }
 
 #[tokio::test]
@@ -164,7 +163,7 @@ async fn test_connect_page_loads() {
     browser
         .wait_for_text("算力互联", 10_000)
         .expect("Connect page did not load");
-    browser.screenshot("console-connect").ok();
+    let _ = browser.screenshot("console-connect");
 }
 
 #[tokio::test]
@@ -181,5 +180,5 @@ async fn test_playground_page_loads() {
         .wait_for_text("Playground", 20_000)
         .or_else(|_| browser.wait_for_text("演练场", 5_000))
         .expect("Playground page did not load");
-    browser.screenshot("console-playground").ok();
+    let _ = browser.screenshot("console-playground");
 }

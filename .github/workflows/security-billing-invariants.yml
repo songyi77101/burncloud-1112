@@ -1,0 +1,93 @@
+name: Security & Billing Invariants
+
+on:
+  pull_request:
+    paths:
+      - "crates/interfaces/server/**"
+      - "crates/traffic/router/**"
+      - "crates/platform/node/**"
+      - "crates/platform/storage/database/src/**"
+      - "crates/traffic/database-router/**"
+      - "crates/traffic/service-router-log/**"
+      - ".github/workflows/security-billing-invariants.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/interfaces/server/**"
+      - "crates/traffic/router/**"
+      - "crates/platform/node/**"
+      - "crates/platform/storage/database/src/**"
+      - "crates/traffic/database-router/**"
+      - "crates/traffic/service-router-log/**"
+      - ".github/workflows/security-billing-invariants.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  invariants:
+    name: Security + Billing invariant suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      JWT_SECRET: burncloud-ci-security-invariant-jwt-secret-2026
+      BURNCLOUD_INTERNAL_SECRET: burncloud-ci-security-invariant-internal-secret
+      MASTER_KEY: a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8
+      SKIP_INITIAL_PRICE_SYNC: "1"
+      RUST_BACKTRACE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+            head_sha="${{ github.sha }}"
+          fi
+
+          mapfile -d '' rust_files < <(
+            git diff --name-only --diff-filter=ACMR -z "$base_sha" "$head_sha" -- '*.rs'
+          )
+
+          if [ "${#rust_files[@]}" -eq 0 ]; then
+            echo "No changed Rust files to format-check."
+            exit 0
+          fi
+
+          printf 'Checking rustfmt on %s changed Rust file(s):\n' "${#rust_files[@]}"
+          printf '  %s\n' "${rust_files[@]}"
+          rustfmt --edition 2021 --check --config skip_children=true "${rust_files[@]}"
+
+      - name: Check affected packages
+        run: cargo check -p burncloud-router -p burncloud-server
+
+      - name: Node runtime tests
+        run: cargo test -p burncloud-node-runtime
+
+      - name: Node P0 interrupted-preparation invariants
+        run: cargo test -p burncloud-server --lib node_orchestrator::tests::interrupted_
+
+      - name: Node black-box API tests
+        run: cargo test -p burncloud-server --lib node_test
+
+      - name: Billing invariants
+        run: cargo test -p burncloud-router --test billing_invariants --test quota_tests
+
+      - name: Security invariants
+        run: cargo test -p burncloud-server --test security_invariants

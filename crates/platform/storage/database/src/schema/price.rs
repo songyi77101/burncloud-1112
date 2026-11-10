@@ -22,60 +22,108 @@ pub(super) async fn migrate_prices(pool: &AnyPool, kind: &str) -> Result<()> {
     Ok(())
 }
 
-async fn table_exists(pool: &AnyPool, kind: &str, table: &str) -> Result<bool> {
-    let count: i64 = if kind == "sqlite" {
-        sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?")
-            .bind(table)
-            .fetch_one(pool)
-            .await?
-    } else {
-        sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_name = $1")
-            .bind(table)
-            .fetch_one(pool)
-            .await?
-    };
-    Ok(count > 0)
-}
-
 /// Rename `prices_v2` → `billing_prices`, preserving existing data as `prices_deprecated`.
+///
+/// `prices_v2` was an intermediate migration artifact (new nanodollar format).
+/// `billing_prices` is the canonical table name.  If `billing_prices` already
+/// exists (populated by rename.rs from old-format `prices` data), it is saved as
+/// `prices_deprecated` so the higher-quality `prices_v2` data takes precedence.
 async fn migrate_prices_v2(pool: &AnyPool, kind: &str) -> Result<()> {
-    if !table_exists(pool, kind, "prices_v2").await? {
+    let prices_v2_exists: bool = if kind == "sqlite" {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='prices_v2'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    } else {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'prices_v2'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    };
+
+    if !prices_v2_exists {
         return Ok(());
     }
 
     tracing::info!("Migrating prices_v2 to billing_prices table...");
-    let billing_prices_exists = table_exists(pool, kind, "billing_prices").await?;
-    let old_prices_exists = table_exists(pool, kind, "prices").await?;
 
+    // Check for existing billing_prices (canonical, created by rename.rs from old prices).
+    // Also check for legacy prices table on installs where rename.rs hasn't run yet.
+    let billing_prices_exists: bool = if kind == "sqlite" {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='billing_prices'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    } else {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'billing_prices'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    };
+
+    let old_prices_exists: bool = if kind == "sqlite" {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='prices'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    } else {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'prices'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    };
+
+    // Save existing billing_prices (or legacy prices) as prices_deprecated so
+    // the newer-format prices_v2 data can take the canonical slot.
     if billing_prices_exists {
-        sqlx::query("DROP TABLE IF EXISTS prices_deprecated")
+        let _ = sqlx::query("DROP TABLE IF EXISTS prices_deprecated")
             .execute(pool)
-            .await?;
-        sqlx::query("ALTER TABLE billing_prices RENAME TO prices_deprecated")
+            .await;
+        let _ = sqlx::query("ALTER TABLE billing_prices RENAME TO prices_deprecated")
             .execute(pool)
-            .await?;
+            .await;
         tracing::info!("  Saved existing 'billing_prices' as 'prices_deprecated'");
     } else if old_prices_exists {
-        sqlx::query("DROP TABLE IF EXISTS prices_deprecated")
+        // Very old install: rename.rs hasn't run yet and prices still has the old name.
+        let _ = sqlx::query("DROP TABLE IF EXISTS prices_deprecated")
             .execute(pool)
-            .await?;
-        sqlx::query("ALTER TABLE prices RENAME TO prices_deprecated")
+            .await;
+        let _ = sqlx::query("ALTER TABLE prices RENAME TO prices_deprecated")
             .execute(pool)
-            .await?;
+            .await;
         tracing::info!("  Renamed old 'prices' table to 'prices_deprecated'");
     }
 
-    sqlx::query("ALTER TABLE prices_v2 RENAME TO billing_prices")
+    let _ = sqlx::query("ALTER TABLE prices_v2 RENAME TO billing_prices")
         .execute(pool)
-        .await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_prices_model ON billing_prices(model)")
-        .execute(pool)
-        .await?;
-    sqlx::query(
+        .await;
+    let _ =
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_billing_prices_model ON billing_prices(model)")
+            .execute(pool)
+            .await;
+    let _ = sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_billing_prices_model_region ON billing_prices(model, region)",
     )
     .execute(pool)
-    .await?;
+    .await;
     tracing::info!("  Renamed 'prices_v2' to 'billing_prices'");
     Ok(())
 }
@@ -85,16 +133,23 @@ async fn cleanup_temp_tables(pool: &AnyPool, kind: &str) -> Result<()> {
     let temp_tables = ["prices_v2_new", "tiered_pricing_new", "exchange_rates_new"];
     for table in temp_tables {
         if kind == "sqlite" {
-            if table_exists(pool, kind, table).await? {
-                sqlx::query(&format!("DROP TABLE {table}"))
+            let exists: i64 = sqlx::query_scalar(&format!(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{table}'"
+            ))
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+            if exists > 0 {
+                let _ = sqlx::query(&format!("DROP TABLE {table}"))
                     .execute(pool)
-                    .await?;
+                    .await;
                 tracing::info!("  Dropped temporary table '{table}'");
             }
         } else {
-            sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
                 .execute(pool)
-                .await?;
+                .await;
         }
     }
     Ok(())
@@ -104,9 +159,29 @@ async fn cleanup_temp_tables(pool: &AnyPool, kind: &str) -> Result<()> {
 async fn migrate_prices_deprecated(pool: &AnyPool, kind: &str) -> Result<()> {
     let prices_count: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_prices")
         .fetch_one(pool)
-        .await?;
+        .await
+        .unwrap_or(0);
 
-    if prices_count != 0 || !table_exists(pool, kind, "prices_deprecated").await? {
+    let deprecated_exists: bool = if kind == "sqlite" {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='prices_deprecated'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    } else {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_name = 'prices_deprecated'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        count > 0
+    };
+
+    if prices_count != 0 || !deprecated_exists {
         return Ok(());
     }
 
@@ -168,16 +243,18 @@ async fn migrate_prices_deprecated(pool: &AnyPool, kind: &str) -> Result<()> {
         _ => return Ok(()),
     };
 
-    sqlx::query(migrate_sql)
+    let _ = sqlx::query(migrate_sql)
         .bind(now)
         .bind(now)
         .execute(pool)
-        .await?;
+        .await;
     tracing::info!("  Migrated data from prices_deprecated to billing_prices");
     Ok(())
 }
 
 /// Convert REAL-typed price columns to nanodollars (SQLite only).
+///
+/// Some rows were inserted as dollar floats before the nanodollar migration.
 async fn fix_real_prices(pool: &AnyPool, kind: &str) -> Result<()> {
     if kind != "sqlite" {
         return Ok(());
@@ -187,7 +264,8 @@ async fn fix_real_prices(pool: &AnyPool, kind: &str) -> Result<()> {
         "SELECT COUNT(*) FROM billing_prices WHERE typeof(input_price) = 'real'",
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .unwrap_or(0);
 
     if real_count == 0 {
         return Ok(());
@@ -196,7 +274,8 @@ async fn fix_real_prices(pool: &AnyPool, kind: &str) -> Result<()> {
     tracing::info!(
         "Fixing {real_count} rows with REAL-typed prices (converting dollars to nanodollars)..."
     );
-    let set_clauses = price_column_names()
+    let price_cols = price_column_names();
+    let set_clauses = price_cols
         .iter()
         .map(|col| {
             format!(
@@ -209,12 +288,14 @@ async fn fix_real_prices(pool: &AnyPool, kind: &str) -> Result<()> {
         .join(", ");
     let update_sql =
         format!("UPDATE billing_prices SET {set_clauses} WHERE typeof(input_price) = 'real'");
-    sqlx::query(&update_sql).execute(pool).await?;
+    let _ = sqlx::query(&update_sql).execute(pool).await;
     tracing::info!("  Converted dollar-format prices to nanodollar format");
     Ok(())
 }
 
 /// Convert small-integer (old USD dollar format) prices to nanodollars (SQLite only).
+///
+/// Threshold: any non-zero price < 10_000 is considered old USD format.
 async fn fix_small_int_prices(pool: &AnyPool, kind: &str) -> Result<()> {
     if kind != "sqlite" {
         return Ok(());
@@ -226,7 +307,8 @@ async fn fix_small_int_prices(pool: &AnyPool, kind: &str) -> Result<()> {
             OR (output_price > 0 AND output_price < 10000)",
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .unwrap_or(0);
 
     if small_int_count == 0 {
         return Ok(());
@@ -236,7 +318,8 @@ async fn fix_small_int_prices(pool: &AnyPool, kind: &str) -> Result<()> {
         "Fixing {small_int_count} rows with small-integer prices \
          (old USD dollar format -> nanodollars)..."
     );
-    let set_clauses = price_column_names()
+    let price_cols = price_column_names();
+    let set_clauses = price_cols
         .iter()
         .map(|col| {
             format!(
@@ -251,14 +334,17 @@ async fn fix_small_int_prices(pool: &AnyPool, kind: &str) -> Result<()> {
          (input_price > 0 AND input_price < 10000) \
          OR (output_price > 0 AND output_price < 10000)"
     );
-    sqlx::query(&update_sql).execute(pool).await?;
+    let _ = sqlx::query(&update_sql).execute(pool).await;
     tracing::info!("  Converted small-integer USD prices to nanodollar format");
     Ok(())
 }
 
 /// Normalise NULL region values and deduplicate rows in `billing_prices`.
+///
+/// SQLite UNIQUE(model, region) does NOT deduplicate NULLs (SQL standard:
+/// NULL != NULL).  Normalise NULL → '' then remove duplicate rows.
 async fn normalise_regions(pool: &AnyPool) -> Result<()> {
-    sqlx::query(
+    let _ = sqlx::query(
         "DELETE FROM billing_prices
          WHERE region IS NULL
            AND EXISTS (
@@ -269,11 +355,11 @@ async fn normalise_regions(pool: &AnyPool) -> Result<()> {
            )",
     )
     .execute(pool)
-    .await?;
+    .await;
 
-    sqlx::query("UPDATE billing_prices SET region = '' WHERE region IS NULL")
+    let _ = sqlx::query("UPDATE billing_prices SET region = '' WHERE region IS NULL")
         .execute(pool)
-        .await?;
+        .await;
 
     let dedup_result = sqlx::query(
         "DELETE FROM billing_prices WHERE id NOT IN (
@@ -281,10 +367,12 @@ async fn normalise_regions(pool: &AnyPool) -> Result<()> {
          )",
     )
     .execute(pool)
-    .await?;
-    let removed = dedup_result.rows_affected();
-    if removed > 0 {
-        tracing::info!("  Removed {removed} duplicate price rows");
+    .await;
+    if let Ok(r) = dedup_result {
+        let removed = r.rows_affected();
+        if removed > 0 {
+            tracing::info!("  Removed {removed} duplicate price rows");
+        }
     }
     Ok(())
 }

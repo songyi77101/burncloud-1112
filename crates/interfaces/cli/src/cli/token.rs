@@ -1,13 +1,69 @@
 use anyhow::Result;
 use burncloud_database::Database;
-use burncloud_service_user::{UserApiKey, UserApiKeyInput, UserApiKeyModel, UserApiKeyUpdateInput};
+use burncloud_database_user::{UserApiKeyInput, UserApiKeyModel, UserApiKeyUpdateInput};
 use clap::ArgMatches;
 use std::io::{self, Write};
 
-pub(crate) async fn handle_token_command(db: &Database, matches: &ArgMatches) -> Result<()> {
+pub async fn handle_token_command(db: &Database, matches: &ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list", sub_m)) => {
-            list_tokens(db, sub_m).await?;
+            let limit: i32 = sub_m
+                .get_one::<String>("limit")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100);
+            let offset: i32 = sub_m
+                .get_one::<String>("offset")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let user_id = sub_m.get_one::<String>("user-id").map(|s| s.as_str());
+            let format = sub_m
+                .get_one::<String>("format")
+                .map(|s| s.as_str())
+                .unwrap_or("table");
+
+            let tokens = UserApiKeyModel::list(db, limit, offset, user_id).await?;
+
+            if tokens.is_empty() {
+                println!("No tokens found.");
+                return Ok(());
+            }
+
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&tokens)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!(
+                        "{:<52} {:<20} {:<12} {:>12} {:<8} {:>12}",
+                        "Key", "Name", "User", "Quota", "Status", "Expired"
+                    );
+                    println!("{}", "-".repeat(120));
+
+                    for token in tokens {
+                        let name = token.name.as_deref().unwrap_or("-");
+                        let quota = if token.unlimited_quota {
+                            "unlimited".to_string()
+                        } else {
+                            token.remain_quota.to_string()
+                        };
+                        let status = if token.status == 1 {
+                            "active"
+                        } else {
+                            "disabled"
+                        };
+                        let expired = if token.expired_time == -1 {
+                            "never".to_string()
+                        } else {
+                            format!("{}", token.expired_time)
+                        };
+                        println!(
+                            "{:<52} {:<20} {:<12} {:>12} {:<8} {:>12}",
+                            token.key, name, token.user_id, quota, status, expired
+                        );
+                    }
+                }
+            }
         }
         Some(("create", sub_m)) => {
             let user_id = sub_m
@@ -56,15 +112,9 @@ pub(crate) async fn handle_token_command(db: &Database, matches: &ArgMatches) ->
 
             let updated = UserApiKeyModel::update(db, key, &input).await?;
             if updated {
-                println!(
-                    "✓ Token '{}' updated successfully!",
-                    UserApiKey::mask_key(key)
-                );
+                println!("✓ Token '{}' updated successfully!", key);
             } else {
-                println!(
-                    "Token '{}' not found or no changes made.",
-                    UserApiKey::mask_key(key)
-                );
+                println!("Token '{}' not found or no changes made.", key);
             }
         }
         Some(("delete", sub_m)) => {
@@ -74,10 +124,7 @@ pub(crate) async fn handle_token_command(db: &Database, matches: &ArgMatches) ->
             let skip_confirm = sub_m.get_flag("yes");
 
             if !skip_confirm {
-                print!(
-                    "Are you sure you want to delete token '{}'? [y/N] ",
-                    UserApiKey::mask_key(key)
-                );
+                print!("Are you sure you want to delete token '{}'? [y/N] ", key);
                 io::stdout().flush()?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
@@ -98,74 +145,6 @@ pub(crate) async fn handle_token_command(db: &Database, matches: &ArgMatches) ->
         _ => {
             println!("Usage: burncloud token <list|create|update|delete>");
             println!("Run 'burncloud token --help' for more information.");
-        }
-    }
-
-    Ok(())
-}
-
-/// List API keys, rendering either pretty JSON or an aligned table.
-async fn list_tokens(db: &Database, sub_m: &ArgMatches) -> Result<()> {
-    let limit: i32 = sub_m
-        .get_one::<String>("limit")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
-    let offset: i32 = sub_m
-        .get_one::<String>("offset")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let user_id = sub_m.get_one::<String>("user-id").map(|s| s.as_str());
-    let format = sub_m
-        .get_one::<String>("format")
-        .map(|s| s.as_str())
-        .unwrap_or("table");
-
-    let tokens = UserApiKeyModel::list(db, limit, offset, user_id).await?;
-
-    if tokens.is_empty() {
-        println!("No tokens found.");
-        return Ok(());
-    }
-
-    match format {
-        "json" => {
-            let json = serde_json::to_string_pretty(&tokens)?;
-            println!("{}", json);
-        }
-        _ => {
-            println!(
-                "{:<52} {:<20} {:<12} {:>12} {:<8} {:>12}",
-                "Key", "Name", "User", "Quota", "Status", "Expired"
-            );
-            println!("{}", "-".repeat(120));
-
-            for token in tokens {
-                let name = token.name.as_deref().unwrap_or("-");
-                let quota = if token.unlimited_quota {
-                    "unlimited".to_string()
-                } else {
-                    token.remain_quota.to_string()
-                };
-                let status = if token.status == 1 {
-                    "active"
-                } else {
-                    "disabled"
-                };
-                let expired = if token.expired_time == -1 {
-                    "never".to_string()
-                } else {
-                    format!("{}", token.expired_time)
-                };
-                println!(
-                    "{:<52} {:<20} {:<12} {:>12} {:<8} {:>12}",
-                    token.masked_key(),
-                    name,
-                    token.user_id,
-                    quota,
-                    status,
-                    expired
-                );
-            }
         }
     }
 

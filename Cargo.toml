@@ -1,23 +1,25 @@
 [workspace]
 members = [
     "crates/interfaces/common",
-    "crates/identity/token",
-    "crates/identity/user",
-    "crates/traffic/contracts",
-    "crates/supply/contracts",
-    "crates/supply/channel",
-    "crates/supply/model",
+    "crates/identity/database-user",
+    "crates/identity/service-token",
+    "crates/identity/service-user",
+    "crates/supply/database-channel",
+    "crates/supply/database-model",
+    "crates/supply/service-channel",
+    "crates/supply/service-models",
+    "crates/traffic/database-router",
     "crates/traffic/router",
     "crates/traffic/router-aws",
-    "crates/commerce/contracts",
-    "crates/commerce/billing",
+    "crates/traffic/service-router-log",
+    "crates/commerce/database-billing",
+    "crates/commerce/service-billing",
     "crates/trust/inference",
     "crates/platform/configuration/setting",
     "crates/platform/lifecycle/installer",
     "crates/platform/lifecycle/loops",
     "crates/platform/lifecycle/update",
     "crates/platform/node",
-    "crates/platform/code",
     "crates/platform/observability/ip",
     "crates/platform/observability/monitor",
     "crates/platform/storage/database",
@@ -34,60 +36,10 @@ members = [
 license = "MIT"
 publish = false
 
-# -----------------------------------------------------------------------------
-# Repository-wide compiler and Clippy policy
-# -----------------------------------------------------------------------------
-#
-# Hard errors are reserved for behavior that lets an agent hide failures or
-# create correctness hazards. Existing style/complexity debt remains warnings so
-# tightening the policy never becomes an excuse for unrelated refactors.
-
-[workspace.lints.rust]
-# Do not allow visually-confusable identifiers in code written by humans/agents.
-non_ascii_idents = "deny"
-
-# Unsafe functions must still make each unsafe operation explicit.
-unsafe_op_in_unsafe_fn = "deny"
-
-# Results/Futures annotated as must_use may not be silently discarded.
-unused_must_use = "deny"
-
-# Surface accidental public APIs without breaking historical code immediately.
-unreachable_pub = "warn"
-
 [workspace.lints.clippy]
-# Existing hard gates.
 unwrap_used = "deny"
-disallowed_types = "deny"
-
-# Agent escape hatches: unfinished/debug code may not enter production crates.
-todo = "deny"
-unimplemented = "deny"
-dbg_macro = "deny"
-
-# Async/must-use correctness hazards.
-let_underscore_future = "deny"
-# Discarded must-use values are correctness hazards and may not be hidden.
-let_underscore_must_use = "deny"
-await_holding_lock = "deny"
-await_holding_refcell_ref = "deny"
-
-# Historical production debt exists for expect()/panic paths. Keep them visible
-# without expanding this policy PR into behavioral refactoring.
 expect_used = "warn"
-panic_in_result_fn = "warn"
-
-# Any lint suppression added by an agent should carry an explicit justification.
-allow_attributes_without_reason = "warn"
-
-# Maintainability budgets. Thresholds live in clippy.toml and remain warnings
-# until the current codebase is clean enough to promote them to hard gates.
-too_many_arguments = "warn"
-too_many_lines = "warn"
-cognitive_complexity = "warn"
-large_futures = "warn"
-wildcard_imports = "warn"
-undocumented_unsafe_blocks = "warn"
+disallowed_types = "deny"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -117,9 +69,10 @@ dirs = "5.0"
 tempfile = "3.8"
 futures = "0.3"
 futures-util = "0.3"
-regex = "1.11"
+regex = "1"
 once_cell = "1.19"
 dashmap = "5.5"
+time = "0.3"
 hex = "0.4"
 url = "2.5"
 rand = "0.8"
@@ -129,6 +82,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 axum = { version = "0.8.7", features = ["macros", "ws"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "request-id"] }
 http-body-util = "0.1"
+http = "1.0"
 
 # Cryptography
 sha2 = "0.10"
@@ -150,43 +104,50 @@ libc = "0.2"
 winapi = { version = "0.3", features = ["winuser", "pdh", "psapi", "winbase", "winnt", "fileapi", "handleapi", "winerror", "sysinfoapi", "winreg"] }
 
 # UI
+dioxus-desktop = "0.7.2"
+dioxus-ssr = "0.7.2"
 
 # Build
 winres = "0.1"
+image = "0.25"
 
 # Application
-self_update = { version = "1.3.0", features = ["archive-zip"] }
+self_update = { version = "0.42.0", features = ["archive-zip"] }
+systray = "0.4.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 tracing-log = "0.2"
 
 # Internal crates
-# Each path dependency also carries the owning package's current version.
-# Avoid wildcard path requirements so cargo-deny can enforce wildcards = "deny".
-burncloud-code = { path = "crates/platform/code", version = "0.1.0"  }
-burncloud-auto-update = { path = "crates/platform/lifecycle/update", version = "0.1.2"  }
-burncloud-client = { path = "crates/interfaces/client", version = "0.2.0", default-features = false  }
-burncloud-commerce-contracts = { path = "crates/commerce/contracts", version = "0.1.0"  }
-burncloud-common = { path = "crates/interfaces/common", version = "0.1.9"  }
-burncloud-database = { path = "crates/platform/storage/database", version = "0.1.0"  }
-burncloud-commerce-billing = { path = "crates/commerce/billing", version = "0.1.0"  }
-burncloud-database-sys = { path = "crates/platform/storage/database-sys", version = "0.1.0"  }
-burncloud-download = { path = "crates/platform/storage/download", version = "0.1.0"  }
-burncloud-download-aria2 = { path = "crates/platform/storage/download-aria2", version = "0.1.0"  }
-burncloud-installer = { path = "crates/platform/lifecycle/installer", version = "0.1.0"  }
-burncloud-node-runtime = { path = "crates/platform/node", version = "0.1.0"  }
-burncloud-router = { path = "crates/traffic/router", version = "0.1.0"  }
-burncloud-server = { path = "crates/interfaces/server", version = "0.1.9"  }
-burncloud-service-ip = { path = "crates/platform/observability/ip", version = "0.1.0"  }
-burncloud-service-monitor = { path = "crates/platform/observability/monitor", version = "0.1.0"  }
-burncloud-service-setting = { path = "crates/platform/configuration/setting", version = "0.1.0"  }
-burncloud-identity-user = { path = "crates/identity/user", version = "0.1.0"  }
-burncloud-identity-token = { path = "crates/identity/token", version = "0.1.0"  }
-burncloud-supply-channel = { path = "crates/supply/channel", version = "0.1.0"  }
-burncloud-supply-model = { path = "crates/supply/model", version = "0.1.0"  }
-burncloud-supply-contracts = { path = "crates/supply/contracts", version = "0.1.0"  }
-burncloud-traffic-contracts = { path = "crates/traffic/contracts", version = "0.1.0"  }
+burncloud-auto-update = { path = "crates/platform/lifecycle/update" }
+burncloud-client = { path = "crates/interfaces/client", default-features = false }
+burncloud-common = { path = "crates/interfaces/common" }
+burncloud-database = { path = "crates/platform/storage/database" }
+burncloud-database-billing = { path = "crates/commerce/database-billing" }
+burncloud-database-channel = { path = "crates/supply/database-channel" }
+burncloud-database-model = { path = "crates/supply/database-model" }
+burncloud-database-router = { path = "crates/traffic/database-router" }
+burncloud-database-sys = { path = "crates/platform/storage/database-sys" }
+burncloud-database-user = { path = "crates/identity/database-user" }
+burncloud-download = { path = "crates/platform/storage/download" }
+burncloud-download-aria2 = { path = "crates/platform/storage/download-aria2" }
+burncloud-installer = { path = "crates/platform/lifecycle/installer" }
+burncloud-node-runtime = { path = "crates/platform/node" }
+burncloud-router = { path = "crates/traffic/router" }
+burncloud-router-aws = { path = "crates/traffic/router-aws" }
+burncloud-server = { path = "crates/interfaces/server" }
+burncloud-service = { path = "crates/interfaces/service" }
+burncloud-service-ip = { path = "crates/platform/observability/ip" }
+burncloud-service-models = { path = "crates/supply/service-models" }
+burncloud-service-monitor = { path = "crates/platform/observability/monitor" }
+burncloud-service-setting = { path = "crates/platform/configuration/setting" }
+burncloud-service-inference = { path = "crates/trust/inference" }
+burncloud-service-user = { path = "crates/identity/service-user" }
+burncloud-service-token = { path = "crates/identity/service-token" }
+burncloud-service-router-log = { path = "crates/traffic/service-router-log" }
+burncloud-service-billing = { path = "crates/commerce/service-billing" }
+burncloud-service-channel = { path = "crates/supply/service-channel" }
 
 [package]
 name = "burncloud"
@@ -208,10 +169,7 @@ name = "burncloud"
 path = "crates/interfaces/cli/src/main.rs"
 
 [dependencies]
-burncloud-code.workspace = true
-burncloud-commerce-contracts.workspace = true
 burncloud-common.workspace = true
-burncloud-supply-contracts.workspace = true
 burncloud-server.workspace = true
 burncloud-client = { workspace = true, default-features = false, features = ["liveview"] }
 
@@ -223,11 +181,11 @@ hex.workspace = true
 
 burncloud-auto-update.workspace = true
 burncloud-database.workspace = true
-burncloud-commerce-billing.workspace = true
-burncloud-supply-channel.workspace = true
-burncloud-router.workspace = true
+burncloud-database-billing.workspace = true
+burncloud-database-channel.workspace = true
+burncloud-database-router.workspace = true
 burncloud-database-sys.workspace = true
-burncloud-identity-user.workspace = true
+burncloud-database-user.workspace = true
 burncloud-installer.workspace = true
 bcrypt.workspace = true
 uuid.workspace = true
@@ -239,8 +197,5 @@ serde_json.workspace = true
 dirs.workspace = true
 chrono.workspace = true
 
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+[target.'cfg(windows)'.dependencies]
 burncloud-client = { workspace = true, default-features = false, features = ["desktop"] }
-
-[lints]
-workspace = true

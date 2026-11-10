@@ -1,9 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::unnecessary_unwrap,
-    reason = "Test-only file: the assertions and unwraps are the test."
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unnecessary_unwrap)]
 //! Integration tests for migration 0010 (table renames).
 //!
 //! Verifies that:
@@ -17,25 +12,15 @@
 //!
 //! Strategy: create a fresh SQLite database via `create_database_with_url`, which
 //! runs all migrations (0001–0010) and the `schema/rename.rs` data-copy logic.
-//!
-//! Since #842 that factory creates schema and historic fixups only. Domain default records
-//! are owned by Identity and Supply and are seeded by the application bootstrap, so they are
-//! absent here; this file exercises the migration/rename surface, which does not depend on
-//! them. The owner-seeded startup contract is asserted in
-//! `crates/interfaces/server/tests/owner_seed_contract.rs`.
 
-use burncloud_database::{create_database_with_url, sqlite_url, sqlx};
+use burncloud_database::{create_database_with_url, sqlx};
 use sqlx::any::{AnyConnectOptions, AnyPoolOptions};
 use std::str::FromStr;
 use tempfile::NamedTempFile;
 
 async fn create_test_db() -> (burncloud_database::Database, NamedTempFile) {
     let tmp = NamedTempFile::new().unwrap_or_else(|_| panic!("failed to create temp file"));
-    let url = sqlite_url(
-        &tmp.path().to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("failed to initialize test database: {e}"));
@@ -55,6 +40,19 @@ async fn table_exists(db: &burncloud_database::Database, table_name: &str) -> bo
             .await
             .unwrap_or(0);
     count > 0
+}
+
+/// Helper: count rows in a table.
+async fn count_rows(db: &burncloud_database::Database, table_name: &str) -> i64 {
+    let pool = db
+        .get_connection()
+        .unwrap_or_else(|_| panic!("no connection"))
+        .pool();
+    let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table_name}"))
+        .fetch_one(pool)
+        .await
+        .unwrap_or(-1);
+    count
 }
 
 // ─── New tables exist ────────────────────────────────────────────────────────
@@ -277,12 +275,11 @@ async fn test_user_role_bindings_insert_and_query() {
 
     // Insert a binding (user_role_bindings has FK to user_accounts and user_roles,
     // but user_roles is currently missing on fresh installs — insert without FK check)
-    sqlx::query(
+    let _ = sqlx::query(
         "INSERT INTO user_role_bindings (user_id, role_id) VALUES ('bind-user-1', 'role-1')",
     )
     .execute(pool)
-    .await
-    .ok();
+    .await;
 
     // Verify via user_accounts that the user is queryable (FK-agnostic check)
     let count: i64 =
@@ -589,17 +586,44 @@ async fn test_user_recharges_insert_and_query() {
     assert_eq!(amount, 1000000000);
 }
 
-// ─── Seed ownership moved out of this crate (#842) ──────────────────────────
+// ─── Seed data verification ─────────────────────────────────────────────────
 
-// `test_seed_user_in_user_accounts` and `test_seed_data_uses_new_table_names` used to assert
-// that `create_database_with_url` had inserted the `demo-user` row, the demo API key and the
-// four default protocol configs. All three moved to their domain owners in #842
-// (`UserDatabase::seed_demo_defaults`, `ChannelProtocolConfigModel::seed_default_protocol_configs`),
-// and this crate must not depend on those owners to call them — `deny.toml` bans the edge, which
-// is exactly the one-way direction #842 requires. The two halves of the contract are asserted
-// where they belong: Platform's "creates no domain records" in
-// `tests/initialization_boundary.rs`, and the owner-seeded startup state in
-// `crates/interfaces/server/tests/owner_seed_contract.rs`.
+#[tokio::test]
+async fn test_seed_user_in_user_accounts() {
+    let (db, _tmp) = create_test_db().await;
+    let pool = db
+        .get_connection()
+        .unwrap_or_else(|_| panic!("no connection"))
+        .pool();
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_accounts WHERE username = 'demo-user'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|e| panic!("count seed user failed: {e}"));
+    assert!(
+        count > 0,
+        "seed user 'demo-user' should exist in user_accounts"
+    );
+}
+
+#[tokio::test]
+async fn test_seed_data_uses_new_table_names() {
+    let (db, _tmp) = create_test_db().await;
+
+    assert!(
+        count_rows(&db, "user_accounts").await >= 1,
+        "user_accounts should have seed data"
+    );
+    assert!(
+        count_rows(&db, "user_api_keys").await >= 1,
+        "user_api_keys should have seed data"
+    );
+    assert!(
+        count_rows(&db, "channel_protocol_configs").await >= 4,
+        "channel_protocol_configs should have 4 default entries"
+    );
+}
 
 // ─── Migration idempotency ──────────────────────────────────────────────────
 
@@ -651,11 +675,7 @@ async fn test_all_migrations_recorded() {
 /// Helper: connect directly to a SQLite file with raw sqlx (no migration framework).
 async fn raw_sqlite_pool(path: &std::path::Path) -> sqlx::AnyPool {
     sqlx::any::install_default_drivers();
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let options = AnyConnectOptions::from_str(&url)
         .unwrap_or_else(|e| panic!("parse sqlite url failed: {e}"));
     AnyPoolOptions::new()
@@ -666,10 +686,6 @@ async fn raw_sqlite_pool(path: &std::path::Path) -> sqlx::AnyPool {
 }
 
 /// Create old-style tables (matching 0001 schema) with no migration tracking.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one flat list of legacy DDL statements; splitting it would obscure the 0001 schema"
-)]
 async fn create_old_schema(pool: &sqlx::AnyPool) {
     // users (old name for user_accounts)
     sqlx::query(
@@ -883,11 +899,7 @@ async fn test_data_migration_users_to_user_accounts() {
     }
 
     // Phase 2: run migrations
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -934,11 +946,7 @@ async fn test_data_migration_channels_to_channel_providers() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -978,11 +986,7 @@ async fn test_data_migration_abilities_to_channel_abilities() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1022,11 +1026,7 @@ async fn test_data_migration_tokens_to_user_api_keys() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1070,11 +1070,7 @@ async fn test_data_migration_prices_to_billing_prices() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1115,11 +1111,7 @@ async fn test_data_migration_protocol_configs_to_channel_protocol_configs() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1159,11 +1151,7 @@ async fn test_data_migration_tiered_pricing_to_billing_tiered_prices() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1205,11 +1193,7 @@ async fn test_data_migration_exchange_rates_to_billing_exchange_rates() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1250,11 +1234,7 @@ async fn test_data_migration_video_tasks_to_router_video_tasks() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1292,11 +1272,7 @@ async fn test_data_migration_setting_to_sys_settings() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1335,11 +1311,7 @@ async fn test_data_migration_downloads_to_sys_downloads() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1379,11 +1351,7 @@ async fn test_data_migration_installations_to_sys_installations() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1426,11 +1394,7 @@ async fn test_data_migration_preserves_multiple_rows() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));
@@ -1499,11 +1463,7 @@ async fn test_data_migration_cross_domain() {
         pool.close().await;
     }
 
-    let url = sqlite_url(
-        &path.to_string_lossy().replace('\\', "/"),
-        cfg!(windows),
-        true,
-    );
+    let url = format!("sqlite://{}?mode=rwc", path.display());
     let db = create_database_with_url(&url)
         .await
         .unwrap_or_else(|e| panic!("migration failed: {e}"));

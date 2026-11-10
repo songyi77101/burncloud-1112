@@ -1,23 +1,20 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(
-    clippy::disallowed_types,
-    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
-)]
+#![allow(clippy::disallowed_types)]
 
 use super::{current_unix_timestamp, generate_chat_id};
-use burncloud_traffic_contracts::OpenAIChatRequest;
+use burncloud_common::types::OpenAIChatRequest;
 use serde::Serialize;
 use serde_json::{json, Value};
 
 // Gemini Specific Types
 #[derive(Serialize, Debug)]
-pub(crate) struct GeminiContent {
+pub struct GeminiContent {
     pub role: String,
     pub parts: Vec<GeminiPart>,
 }
 
 #[derive(Serialize, Debug)]
-pub(crate) struct GeminiPart {
+pub struct GeminiPart {
     pub text: String,
 }
 
@@ -26,7 +23,7 @@ pub(crate) struct GeminiPart {
                                    // Wait, Gemini API expects camelCase "generationConfig".
                                    // Rust standard is snake_case "generation_config".
                                    // Serde can map this.
-pub(crate) struct GeminiRequest {
+pub struct GeminiRequest {
     pub contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_config: Option<GeminiGenerationConfig>,
@@ -34,17 +31,17 @@ pub(crate) struct GeminiRequest {
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GeminiGenerationConfig {
+pub struct GeminiGenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 }
 
-pub(crate) struct GeminiAdaptor;
+pub struct GeminiAdaptor;
 
 impl GeminiAdaptor {
-    pub(crate) fn convert_request(req: OpenAIChatRequest) -> Value {
+    pub fn convert_request(req: OpenAIChatRequest) -> Value {
         let contents: Vec<GeminiContent> = req
             .messages
             .into_iter()
@@ -77,7 +74,7 @@ impl GeminiAdaptor {
 
     // Convert Gemini Response JSON -> OpenAI Response JSON
     // NOTE: This handles non-streaming response only for now.
-    pub(crate) fn convert_response(mut gemini_resp: Value, model: &str) -> Value {
+    pub fn convert_response(mut gemini_resp: Value, model: &str) -> Value {
         // Handle Array (from streamGenerateContent)
         if gemini_resp.is_array() {
             if let Value::Array(mut arr) = gemini_resp {
@@ -138,7 +135,7 @@ impl GeminiAdaptor {
         })
     }
 
-    pub(crate) fn convert_stream_response(chunk: &str) -> Option<String> {
+    pub fn convert_stream_response(chunk: &str) -> Option<String> {
         // Handle SSE format from Gemini API: "data: {...}"
         // Strip the "data: " prefix if present
         let chunk = chunk.trim();
@@ -237,12 +234,11 @@ impl GeminiAdaptor {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    reason = "test module: fail-fast assertions on router fixtures"
+    clippy::redundant_pattern_matching
 )]
 mod tests {
     use super::*;
-    use burncloud_traffic_contracts::{OpenAIChatMessage, OpenAIChatRequest};
+    use burncloud_common::types::{OpenAIChatMessage, OpenAIChatRequest};
     use serde_json::json;
 
     #[test]
@@ -252,7 +248,6 @@ mod tests {
             messages: vec![OpenAIChatMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
-                extra: Default::default(),
             }],
             temperature: Some(0.5),
             max_tokens: Some(100),

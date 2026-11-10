@@ -750,11 +750,7 @@ impl BundleVerifier {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "unit-test module: assertions on known-good fixtures fail fast with unwrap/expect"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

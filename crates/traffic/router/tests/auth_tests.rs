@@ -5,18 +5,42 @@
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
+    clippy::redundant_pattern_matching
 )]
 
 mod common;
 
 use burncloud_database::sqlx;
-use common::{setup_db, start_mock_upstream, start_test_server};
+use common::{setup_db, start_test_server};
 use reqwest::Client;
 use serde_json::json;
 use std::env;
+
+async fn start_mock_upstream(listener: tokio::net::TcpListener) {
+    let handler = |headers: axum::http::HeaderMap, body: String| async move {
+        // Return a structure similar to HttpBin's response for verification
+        let mut header_map = serde_json::Map::new();
+        for (k, v) in headers {
+            if let Some(key) = k {
+                header_map.insert(
+                    key.to_string(),
+                    serde_json::Value::String(v.to_str().unwrap_or_default().to_string()),
+                );
+            }
+        }
+
+        serde_json::json!({
+            "headers": header_map,
+            "data": body,
+            "json": serde_json::from_str::<serde_json::Value>(&body).ok()
+        })
+        .to_string()
+    };
+
+    axum::serve(listener, axum::Router::new().fallback(handler))
+        .await
+        .unwrap_or_else(|e| panic!("Mock upstream server error: {e}"));
+}
 
 #[tokio::test]
 async fn test_bedrock_proxy() -> anyhow::Result<()> {
@@ -100,23 +124,30 @@ async fn test_deepseek_proxy() -> anyhow::Result<()> {
         start_mock_upstream(listener).await;
     });
 
-    // Current Router routing truth is owned by Supply channels, not router_upstreams.
-    common::insert_test_channel(
-        &pool,
-        75601,
-        "deepseek_proxy fixture",
-        &format!("http://127.0.0.1:{}/anything", mock_port),
-        "sk-deepseek-mock-key",
-        "deepseek-chat",
-        "default",
-    )
-    .await?;
+    let id = "deepseek-test";
+    let name = "DeepSeek Test";
+    let base_url = format!("http://127.0.0.1:{}/anything", mock_port);
+    let api_key = "sk-deepseek-mock-key";
+    let match_path = "/v1/chat/completions/test-deepseek";
+    let auth_type = "DeepSeek";
 
-    // Preflight pricing is required before the upstream request is attempted.
     sqlx::query(
-        "INSERT OR IGNORE INTO billing_prices (model, currency, input_price, output_price, region) VALUES (?, 'USD', 1, 1, '')",
+        r#"
+        INSERT INTO router_upstreams (id, name, base_url, api_key, match_path, auth_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            api_key = excluded.api_key,
+            base_url = excluded.base_url,
+            auth_type = excluded.auth_type,
+            match_path = excluded.match_path
+        "#,
     )
-    .bind("deepseek-chat")
+    .bind(id)
+    .bind(name)
+    .bind(base_url)
+    .bind(api_key)
+    .bind(match_path)
+    .bind(auth_type)
     .execute(&pool)
     .await?;
 
@@ -124,22 +155,17 @@ async fn test_deepseek_proxy() -> anyhow::Result<()> {
     start_test_server(port, &db_url).await;
 
     let client = Client::new();
-    let url = format!("http://localhost:{}/v1/chat/completions", port);
+    let url = format!("http://localhost:{}{}", port, match_path);
 
     let resp = client
         .post(&url)
         .header("Authorization", "Bearer sk-burncloud-demo")
-        .json(&json!({"model": "deepseek-chat", "messages": [{"role": "user", "content": "test"}]}))
+        .json(&json!({"content": "deepseek body"}))
         .send()
         .await?;
 
-    let status = resp.status();
-    let response_text = resp.text().await?;
-    assert_eq!(
-        status, 200,
-        "Proxy should reach its mock upstream; Router response: {response_text}"
-    );
-    let json: serde_json::Value = serde_json::from_str(&response_text)?;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await?;
 
     let headers = json
         .get("headers")
@@ -171,23 +197,30 @@ async fn test_qwen_proxy() -> anyhow::Result<()> {
         start_mock_upstream(listener).await;
     });
 
-    // Current Router routing truth is owned by Supply channels, not router_upstreams.
-    common::insert_test_channel(
-        &pool,
-        75602,
-        "qwen_proxy fixture",
-        &format!("http://127.0.0.1:{}/anything", mock_port),
-        "sk-qwen-mock-key",
-        "qwen-plus",
-        "default",
-    )
-    .await?;
+    let id = "qwen-test";
+    let name = "Qwen Test";
+    let base_url = format!("http://127.0.0.1:{}/anything", mock_port);
+    let api_key = "sk-qwen-mock-key";
+    let match_path = "/api/v1/services/aigc/text-generation/generation/test-qwen";
+    let auth_type = "Qwen";
 
-    // Preflight pricing is required before the upstream request is attempted.
     sqlx::query(
-        "INSERT OR IGNORE INTO billing_prices (model, currency, input_price, output_price, region) VALUES (?, 'USD', 1, 1, '')",
+        r#"
+        INSERT INTO router_upstreams (id, name, base_url, api_key, match_path, auth_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            api_key = excluded.api_key,
+            base_url = excluded.base_url,
+            auth_type = excluded.auth_type,
+            match_path = excluded.match_path
+        "#,
     )
-    .bind("qwen-plus")
+    .bind(id)
+    .bind(name)
+    .bind(base_url)
+    .bind(api_key)
+    .bind(match_path)
+    .bind(auth_type)
     .execute(&pool)
     .await?;
 
@@ -195,22 +228,17 @@ async fn test_qwen_proxy() -> anyhow::Result<()> {
     start_test_server(port, &db_url).await;
 
     let client = Client::new();
-    let url = format!("http://localhost:{}/v1/chat/completions", port);
+    let url = format!("http://localhost:{}{}", port, match_path);
 
     let resp = client
         .post(&url)
         .header("Authorization", "Bearer sk-burncloud-demo")
-        .json(&json!({"model": "qwen-plus", "messages": [{"role": "user", "content": "test"}]}))
+        .json(&json!({"content": "qwen body"}))
         .send()
         .await?;
 
-    let status = resp.status();
-    let response_text = resp.text().await?;
-    assert_eq!(
-        status, 200,
-        "Proxy should reach its mock upstream; Router response: {response_text}"
-    );
-    let json: serde_json::Value = serde_json::from_str(&response_text)?;
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await?;
 
     let headers = json
         .get("headers")

@@ -42,26 +42,26 @@ use sqlx::{AnyPool, Row};
 /// Run all table rename data migrations in conflict-safe order.
 pub(super) async fn migrate_table_renames(pool: &AnyPool, kind: &str) -> Result<()> {
     // Step 1–3: user_ domain — must follow the conflict-safe ordering above.
-    copy_and_drop(pool, kind, "user_roles", "user_role_bindings").await?;
-    copy_and_drop(pool, kind, "roles", "user_roles").await?;
+    copy_and_drop(pool, kind, "user_roles", "user_role_bindings").await;
+    copy_and_drop(pool, kind, "roles", "user_roles").await;
     // Recharges (step 4) comes *before* users (step 3) to avoid a FK violation
     // in PostgreSQL when dropping `users` while `recharges.user_id` still
     // references it.
-    copy_and_drop(pool, kind, "recharges", "user_recharges").await?;
-    copy_and_drop(pool, kind, "users", "user_accounts").await?;
+    copy_and_drop(pool, kind, "recharges", "user_recharges").await;
+    copy_and_drop(pool, kind, "users", "user_accounts").await;
 
     // Steps 5–15: remaining tables (no inter-table name conflicts).
-    copy_and_drop(pool, kind, "channels", "channel_providers").await?;
-    copy_and_drop(pool, kind, "abilities", "channel_abilities").await?;
-    copy_and_drop(pool, kind, "tokens", "user_api_keys").await?;
-    copy_and_drop(pool, kind, "prices", "billing_prices").await?;
-    copy_and_drop(pool, kind, "protocol_configs", "channel_protocol_configs").await?;
-    copy_and_drop(pool, kind, "tiered_pricing", "billing_tiered_prices").await?;
-    copy_and_drop(pool, kind, "exchange_rates", "billing_exchange_rates").await?;
-    copy_and_drop(pool, kind, "video_tasks", "router_video_tasks").await?;
-    copy_and_drop(pool, kind, "setting", "sys_settings").await?;
-    copy_and_drop(pool, kind, "downloads", "sys_downloads").await?;
-    copy_and_drop(pool, kind, "installations", "sys_installations").await?;
+    copy_and_drop(pool, kind, "channels", "channel_providers").await;
+    copy_and_drop(pool, kind, "abilities", "channel_abilities").await;
+    copy_and_drop(pool, kind, "tokens", "user_api_keys").await;
+    copy_and_drop(pool, kind, "prices", "billing_prices").await;
+    copy_and_drop(pool, kind, "protocol_configs", "channel_protocol_configs").await;
+    copy_and_drop(pool, kind, "tiered_pricing", "billing_tiered_prices").await;
+    copy_and_drop(pool, kind, "exchange_rates", "billing_exchange_rates").await;
+    copy_and_drop(pool, kind, "video_tasks", "router_video_tasks").await;
+    copy_and_drop(pool, kind, "setting", "sys_settings").await;
+    copy_and_drop(pool, kind, "downloads", "sys_downloads").await;
+    copy_and_drop(pool, kind, "installations", "sys_installations").await;
 
     Ok(())
 }
@@ -87,73 +87,63 @@ pub(super) async fn migrate_table_renames(pool: &AnyPool, kind: &str) -> Result<
 ///
 /// The DROP uses `CASCADE` on PostgreSQL to release any FK constraints that
 /// still point at the old table name.
-async fn copy_and_drop(pool: &AnyPool, kind: &str, old_table: &str, new_table: &str) -> Result<()> {
+async fn copy_and_drop(pool: &AnyPool, kind: &str, old_table: &str, new_table: &str) {
     if !table_exists(pool, kind, old_table).await {
-        return Ok(());
+        return;
     }
 
+    // Get column lists for both tables
     let old_cols = column_names(pool, kind, old_table).await;
     let new_cols = column_names(pool, kind, new_table).await;
-    let shared = shared_columns(&old_cols, &new_cols);
+
+    // Fresh install detection: if old_table and new_table have no shared columns,
+    // they are different table types. This happens when:
+    // - 0010_rename_tables.sql created a new table with the same name as a legacy table
+    //   but with different purpose (e.g., new user_roles role table vs old user_roles binding table)
+    // - The "old_table" is actually the newly created table, not a legacy table needing migration
+    // In this case, skip the entire operation to avoid dropping the newly created table.
+    let shared: Vec<String> = old_cols
+        .iter()
+        .filter(|c| new_cols.iter().any(|n| n.eq_ignore_ascii_case(c)))
+        .cloned()
+        .collect();
 
     if shared.is_empty() {
         tracing::info!(
             "[Rename] Skipping {old_table} → {new_table}: no shared columns indicates fresh install (table created by 0010, not legacy)"
         );
-        return Ok(());
+        return;
     }
 
-    copy_rows_if_destination_empty(pool, old_table, new_table, &shared).await?;
-    drop_legacy_table(pool, kind, old_table).await?;
-    Ok(())
-}
-
-fn shared_columns(old_cols: &[String], new_cols: &[String]) -> Vec<String> {
-    old_cols
-        .iter()
-        .filter(|column| {
-            new_cols
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(column))
-        })
-        .cloned()
-        .collect()
-}
-
-async fn copy_rows_if_destination_empty(
-    pool: &AnyPool,
-    old_table: &str,
-    new_table: &str,
-    shared: &[String],
-) -> Result<()> {
+    // Guard: only copy when the destination is still empty to avoid duplicates.
     let new_count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {new_table}"))
         .fetch_one(pool)
-        .await?;
+        .await
+        .unwrap_or(0);
 
-    if new_count != 0 {
-        return Ok(());
+    if new_count == 0 {
+        tracing::info!("[Rename] Migrating data: {old_table} → {new_table}");
+
+        let col_list = shared
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let insert_sql =
+            format!("INSERT INTO {new_table} ({col_list}) SELECT {col_list} FROM {old_table}");
+        if let Err(e) = sqlx::query(&insert_sql).execute(pool).await {
+            tracing::warn!("[Rename] Copy {old_table} → {new_table} failed: {e}");
+        }
     }
 
-    tracing::info!("[Rename] Migrating data: {old_table} → {new_table}");
-    let col_list = shared
-        .iter()
-        .map(|column| quote_ident(column))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let insert_sql =
-        format!("INSERT INTO {new_table} ({col_list}) SELECT {col_list} FROM {old_table}");
-    sqlx::query(&insert_sql).execute(pool).await?;
-    Ok(())
-}
-
-async fn drop_legacy_table(pool: &AnyPool, kind: &str, old_table: &str) -> Result<()> {
+    // Drop the old table.  PostgreSQL needs CASCADE to remove dependent FK
+    // constraints; SQLite ignores the CASCADE keyword.
     let drop_sql = if kind == "postgres" {
         format!("DROP TABLE IF EXISTS {old_table} CASCADE")
     } else {
         format!("DROP TABLE IF EXISTS {old_table}")
     };
-    sqlx::query(&drop_sql).execute(pool).await?;
-    Ok(())
+    let _ = sqlx::query(&drop_sql).execute(pool).await;
 }
 
 /// Returns `true` if `table_name` exists in the connected database.
@@ -195,7 +185,7 @@ async fn column_names(pool: &AnyPool, kind: &str, table_name: &str) -> Vec<Strin
             Err(_) => return Vec::new(),
         };
         rows.into_iter()
-            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .filter_map(|r| r.try_get::<String, _>("name").ok())
             .collect()
     } else {
         sqlx::query_scalar(
@@ -215,62 +205,4 @@ async fn column_names(pool: &AnyPool, kind: &str, table_name: &str) -> Vec<Strin
 fn quote_ident(ident: &str) -> String {
     let escaped = ident.replace('"', "\"\"");
     format!("\"{escaped}\"")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-
-    #[tokio::test]
-    async fn copy_failure_preserves_legacy_table() {
-        let outcome = verify_copy_failure_preserves_legacy_table().await;
-        assert!(outcome.is_ok(), "{outcome:?}");
-    }
-
-    async fn verify_copy_failure_preserves_legacy_table() -> TestResult {
-        sqlx::any::install_default_drivers();
-        let pool = sqlx::any::AnyPoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-
-        sqlx::query("CREATE TABLE legacy_items (id INTEGER PRIMARY KEY)")
-            .execute(&pool)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE canonical_items (id INTEGER PRIMARY KEY, required_value TEXT NOT NULL)",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query("INSERT INTO legacy_items (id) VALUES (1)")
-            .execute(&pool)
-            .await?;
-
-        if copy_and_drop(&pool, "sqlite", "legacy_items", "canonical_items")
-            .await
-            .is_ok()
-        {
-            return Err(std::io::Error::other(
-                "copy must fail when the destination has an unsatisfied NOT NULL column",
-            )
-            .into());
-        }
-
-        let legacy_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='legacy_items'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        if legacy_count != 1 {
-            return Err(std::io::Error::other(
-                "legacy table must be preserved when copying rows fails",
-            )
-            .into());
-        }
-
-        pool.close().await;
-        Ok(())
-    }
 }

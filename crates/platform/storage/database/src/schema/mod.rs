@@ -1,30 +1,22 @@
-//! Post-migration data fixups.
+//! Post-migration data fixups and seed data initialisation.
 //!
 //! The DDL (CREATE TABLE / ALTER TABLE) that used to live here has been moved
 //! to versioned `.sql` files under `crates/platform/storage/database/migrations/` and is now
 //! executed by [`crate::migration::MigrationRunner`] before this module runs.
 //!
-//! This module is responsible for **complex data migrations only** — one-time data
-//! transformations that are too dynamic for plain SQL files (e.g. conditional type
-//! coercions, table renames with data copy).
-//!
-//! Platform writes no domain rows itself. Default business records are seeded by their
-//! domain owners, which the application bootstrap calls after infrastructure initialization:
-//! the demo account and demo API key by `identity/user` (`UserDatabase::seed_demo_defaults`)
-//! and the default protocol configs by `supply/channel`
-//! (`ChannelProtocolConfigModel::seed_default_protocol_configs`). Keeping those writes with
-//! their owners is what holds the dependency direction one-way (see [`user`]).
+//! This module is responsible for:
+//! 1. **Complex data migrations** — one-time data transformations that are too
+//!    dynamic for plain SQL files (e.g. conditional type coercions, table
+//!    renames with data copy).
+//! 2. **Seed data** — inserting the demo user/token and default protocol
+//!    configs when they don't yet exist.
 //!
 //! The implementation is split into domain sub-modules:
 //! - [`rename`] — full table rename data migrations (legacy → canonical names)
 //! - [`router`] — router_logs table fixups
 //! - [`price`]  — price table migrations and format conversions
-//! - [`user`]   — token schema migration and quota conversion
+//! - [`user`]   — token schema migration, quota conversion and seed data
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "price migrations are legacy one-shot schema/data compatibility code; #711 made every fallible SQL step explicit, while decomposition is tracked separately from correctness"
-)]
 mod price;
 mod rename;
 mod router;
@@ -44,9 +36,12 @@ pub(crate) fn current_timestamp() -> i64 {
 pub struct Schema;
 
 impl Schema {
-    /// Run historical data fixups without creating application-owned seed records.
-    /// Called after versioned schema migrations.
-    pub async fn init_infrastructure(db: &Database) -> Result<()> {
+    /// Run data migrations and seed initial records.
+    ///
+    /// This is called **after** [`crate::migration::MigrationRunner::run`] has
+    /// applied all DDL migrations, so all tables and columns are guaranteed to
+    /// exist when this function runs.
+    pub async fn init(db: &Database) -> Result<()> {
         let pool = db.get_connection()?.pool();
         let kind = db.kind();
 
@@ -56,20 +51,8 @@ impl Schema {
 
         router::migrate_router_logs(pool, &kind).await?;
         price::migrate_prices(pool, &kind).await?;
-        user::migrate_users(pool, &kind).await?;
+        user::migrate_users_and_seed(pool, &kind).await?;
 
         Ok(())
-    }
-
-    /// Run historical data fixups. Equivalent to [`Self::init_infrastructure`].
-    ///
-    /// Retained as the historical entry-point name. Since #842 there is no follow-up
-    /// default-record phase owned by Platform: the demo account, demo API key and default
-    /// protocol configs are seeded by their domain owners through
-    /// `UserDatabase::seed_demo_defaults` and
-    /// `ChannelProtocolConfigModel::seed_default_protocol_configs`, which the application
-    /// bootstrap calls after infrastructure initialization.
-    pub async fn init(db: &Database) -> Result<()> {
-        Self::init_infrastructure(db).await
     }
 }

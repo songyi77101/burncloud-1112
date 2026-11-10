@@ -10,9 +10,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 #[cfg(test)]
-use burncloud_commerce_contracts::price_u64::rate_to_scaled;
-use burncloud_commerce_contracts::price_u64::scaled_to_rate;
-use burncloud_commerce_contracts::pricing::Currency;
+use burncloud_common::rate_to_scaled;
+use burncloud_common::{scaled_to_rate, Currency};
 use burncloud_database::{sqlx, Database};
 use chrono::{DateTime, Utc};
 
@@ -36,7 +35,7 @@ pub(crate) struct CachedRate {
 
 impl CachedRate {
     /// Get the rate as f64
-    pub(crate) fn rate(&self) -> f64 {
+    pub fn rate(&self) -> f64 {
         scaled_to_rate(self.rate_nano)
     }
 
@@ -64,15 +63,6 @@ impl ExchangeRateService {
             db,
             rates: DashMap::new(),
         }
-    }
-
-    pub(crate) fn snapshot_nano_rates(
-        &self,
-    ) -> std::collections::HashMap<(Currency, Currency), i64> {
-        self.rates
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().rate_nano))
-            .collect()
     }
 
     /// Convert an amount from one currency to another
@@ -272,8 +262,7 @@ impl ExchangeRateService {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    reason = "unit-test module: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
+    clippy::redundant_pattern_matching
 )]
 mod tests {
     use super::*;
@@ -282,31 +271,6 @@ mod tests {
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-    /// Build a SQLite connection URL for a filesystem path.
-    ///
-    /// **The three-slash rule.** `sqlite:///C:/data/db.sqlite` is the absolute form; with only two slashes after
-    /// the scheme SQLite reads `C:` as a **host** and refuses the connection with `(code: 14) unable to open
-    /// database file`. A relative path keeps two slashes.
-    ///
-    /// The test below also used a hard-coded `/tmp/...` path, which on Windows is **not** absolute -- it is a
-    /// relative path whose first component happens to be named `tmp` -- so it wrote into the working directory
-    /// rather than a temporary one. It now uses `std::env::temp_dir()`.
-    ///
-    /// A local copy of `burncloud_database::sqlite_url`, which lives in an open pull request rather than on
-    /// `main`; see the note in this crate's `tests/common.rs`.
-    fn test_sqlite_url(path: &str) -> String {
-        let normalised = path.replace('\\', "/");
-        let absolute = normalised.starts_with('/') || {
-            let head: Vec<char> = normalised.chars().take(3).collect();
-            head.len() == 3 && head[0].is_ascii_alphabetic() && head[1] == ':' && head[2] == '/'
-        };
-        if absolute {
-            format!("sqlite:///{}?mode=rwc", normalised.trim_start_matches('/'))
-        } else {
-            format!("sqlite://{}?mode=rwc", normalised)
-        }
-    }
 
     /// Create a mock database for testing
     /// Since ExchangeRateService tests only use in-memory cache, we can use a minimal mock
@@ -326,16 +290,16 @@ mod tests {
             // Generate unique database path to avoid conflicts between tests
             let test_id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
             let pid = std::process::id();
-            let db_path = std::env::temp_dir()
-                .join(format!("burncloud_test_exch_{}_{}.db", pid, test_id))
-                .to_string_lossy()
-                .to_string();
+            let db_path = format!("/tmp/burncloud_test_exch_{}_{}.db", pid, test_id);
 
             // Remove existing test db if exists
-            std::fs::remove_file(&db_path).ok();
+            let _ = std::fs::remove_file(&db_path);
 
             // Set environment variable for database path
-            std::env::set_var("BURNCLOUD_DATABASE_URL", test_sqlite_url(&db_path));
+            std::env::set_var(
+                "BURNCLOUD_DATABASE_URL",
+                format!("sqlite://{}?mode=rwc", db_path),
+            );
 
             let db = Database::new()
                 .await

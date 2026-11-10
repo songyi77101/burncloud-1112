@@ -1,14 +1,11 @@
 // LLM protocol adaptor — dynamic JSON transformation — Value required; no feasible typed alternative.
-#![allow(
-    clippy::disallowed_types,
-    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
-)]
+#![allow(clippy::disallowed_types)]
 
 use super::factory::ChannelAdaptor;
 use super::gemini::GeminiAdaptor;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use burncloud_traffic_contracts::OpenAIChatRequest;
+use burncloud_common::types::OpenAIChatRequest;
 use chrono::Utc;
 use dashmap::DashMap;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -17,7 +14,7 @@ use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) struct VertexAdaptor {
+pub struct VertexAdaptor {
     pub auth_url: String,
 }
 
@@ -163,10 +160,7 @@ impl ChannelAdaptor for VertexAdaptor {
 }
 
 impl VertexAdaptor {
-    #[allow(
-        dead_code,
-        reason = "service-account auth path kept complete; the router currently authenticates Vertex with an API key"
-    )]
+    #[allow(dead_code)]
     fn parse_service_account(json_str: &str) -> Result<(String, String, Option<String>)> {
         let account: ServiceAccount = serde_json::from_str(json_str)?;
         Ok((
@@ -176,11 +170,8 @@ impl VertexAdaptor {
         ))
     }
 
-    #[allow(
-        dead_code,
-        reason = "service-account OAuth token exchange, exercised by tests but not by the live API-key path"
-    )]
-    pub(crate) async fn get_access_token(
+    #[allow(dead_code)]
+    pub async fn get_access_token(
         &self,
         client_email: &str,
         private_key: &str,
@@ -255,8 +246,7 @@ impl VertexAdaptor {
     clippy::disallowed_types,
     clippy::unnecessary_cast,
     clippy::let_and_return,
-    clippy::redundant_pattern_matching,
-    reason = "test module: fail-fast assertions on router fixtures"
+    clippy::redundant_pattern_matching
 )]
 mod tests {
     use super::*;

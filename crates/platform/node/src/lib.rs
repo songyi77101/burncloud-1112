@@ -12,6 +12,9 @@ mod lifecycle;
 mod preparation;
 mod reconciler;
 mod state;
+pub mod hardware_detection;
+#[cfg(test)]
+mod hardware_detection_smoke_test;
 
 pub use composition::NodeComposition;
 pub use context::NodeContext;
@@ -25,11 +28,11 @@ pub use fake::{
 };
 pub use lifecycle::NodeRuntime;
 pub use preparation::{
-    ArtifactPrepareError, ArtifactPreparer, ArtifactRequest, ArtifactSource, ArtifactSourceError,
-    ArtifactVerificationStatus, Digest, DigestAlgorithm, DigestError, HealthError, HealthProbe,
+    ArtifactPrepareError, ArtifactPreparer, ArtifactRequest, HealthError, HealthProbe,
     PreparedArtifact, PreparedRuntime, ProcessPlan, ReadinessError, ReadinessProbe,
     ReadinessTarget, RuntimeAdapter, RuntimeAdapterError, RuntimePrepareError, RuntimePreparer,
     RuntimeRequest,
 };
 pub use reconciler::{DemandReconciler, ReconcileAction, ReconcileEvidence};
 pub use state::{InvalidNodeTransition, NodeState, NodeStateMachine};
+pub use hardware_detection::{CachedHardwareProfile, HardwareError, HardwareProfile as DetectedHardwareProfile};

@@ -12,23 +12,17 @@
 //! - T4: legacy token with no `router_tokens` row → Value default
 //! - T5: `user_id` reaches the L3 Affinity HRW key (deterministic stickiness)
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::disallowed_types,
-    clippy::panic_in_result_fn,
-    reason = "integration tests: a failed assertion is the intended failure signal, and clippy.toml's allow-panic-in-tests does not recognise #[tokio::test]"
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_types)]
 
 mod common;
 
+use burncloud_common::types::Channel;
+use burncloud_common::TrafficColor;
+use burncloud_database_router::{RouterDatabase, RouterLog};
 use burncloud_router::affinity::pick_hrw;
 use burncloud_router::order_type::OrderType;
 use burncloud_router::SchedulingRequest;
-use burncloud_router::{RouterDatabase, RouterLog};
 use burncloud_service_user::UserService;
-use burncloud_supply_contracts::Channel;
-use burncloud_traffic_contracts::TrafficColor;
 
 use common::{insert_router_token, setup_db};
 
@@ -343,18 +337,14 @@ async fn t5b_layer_decision_and_traffic_color_db_roundtrip() -> anyhow::Result<(
 /// `layer_decision` / `traffic_color`, INSERT it, and SELECT it back —
 /// proving the production code path produces the correct observability values.
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "single end-to-end scenario: the fixture seeding, two routing calls, and the observability round-trip are one narrative"
-)]
 async fn t5c_affinity_hit_e2e_observability() -> anyhow::Result<()> {
-    use burncloud_commerce_billing::PriceCache;
     use burncloud_database::sqlx;
     use burncloud_router::affinity::AffinityCache;
     use burncloud_router::channel_state::ChannelStateTracker;
     use burncloud_router::exchange_rate::ExchangeRateService;
     use burncloud_router::model_router::{ModelRouter, RouteInputs, RoutingDecision};
     use burncloud_router::SchedulingRequest;
+    use burncloud_service_billing::PriceCache;
 
     let (db, pool, _url) = setup_db().await?;
     common::ensure_l6_observability_columns(&pool).await?;
@@ -434,7 +424,7 @@ async fn t5c_affinity_hit_e2e_observability() -> anyhow::Result<()> {
         state_tracker: &state_tracker,
         price_cache: &price_cache,
         exchange_rate: &exchange_rate,
-        scheduler_kind: Some(&burncloud_router::SchedulerKind::Passthrough),
+        scheduler_kind: None,
         request: &sched_req,
         affinity_cache: Some(&affinity_cache),
     };
@@ -456,7 +446,7 @@ async fn t5c_affinity_hit_e2e_observability() -> anyhow::Result<()> {
         state_tracker: &state_tracker,
         price_cache: &price_cache,
         exchange_rate: &exchange_rate,
-        scheduler_kind: Some(&burncloud_router::SchedulerKind::Passthrough),
+        scheduler_kind: None,
         request: &sched_req,
         affinity_cache: Some(&affinity_cache),
     };

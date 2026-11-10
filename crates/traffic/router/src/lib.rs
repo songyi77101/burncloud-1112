@@ -1,8 +1,5 @@
 // Router core — LLM request/response handling — Value required; no feasible typed alternative.
-#![allow(
-    clippy::disallowed_types,
-    reason = "router core handles arbitrary upstream LLM JSON payloads; no feasible typed alternative"
-)]
+#![allow(clippy::disallowed_types)]
 
 mod adaptor;
 pub mod affinity;
@@ -14,8 +11,6 @@ mod config;
 pub mod exchange_rate;
 mod limiter;
 pub mod local_attachment;
-mod local_dispatch;
-pub mod log_service;
 pub mod model_router;
 pub mod order_type;
 pub mod passthrough;
@@ -24,9 +19,7 @@ pub mod rate_budget;
 pub mod response_parser;
 pub mod response_quality;
 mod scheduler;
-pub use scheduler::SchedulerKind;
 mod state;
-pub mod storage;
 pub mod stream_parser;
 mod stream_peek;
 pub mod token_counter;
@@ -61,48 +54,40 @@ impl EmptyResponseCounter {
 
     /// Record an empty response. Returns true if threshold exceeded (should penalize).
     pub fn record_empty(&self, channel_id: &str) -> bool {
-        let mut counters = self.counters.write().unwrap_or_else(|e| e.into_inner());
+        let mut counters = self.counters.write().unwrap();
         let count = counters.entry(channel_id.to_string()).or_insert(0);
         *count += 1;
         let exceeded = *count >= self.threshold;
-        self.log_empty_response(channel_id, *count, exceeded);
-        exceeded
-    }
 
-    /// Log a recorded empty response at the severity matching its counter state.
-    #[allow(
-        clippy::cognitive_complexity,
-        reason = "one branch per counter state; the branches only select a log severity and message"
-    )]
-    fn log_empty_response(&self, channel_id: &str, count: u32, exceeded: bool) {
-        if count == self.threshold - 1 {
-            // Warning when approaching threshold (threshold - 1)
+        // Warning when approaching threshold (threshold - 1)
+        if *count == self.threshold - 1 {
             tracing::warn!(
                 channel_id = channel_id,
-                count = count,
+                count = *count,
                 threshold = self.threshold,
                 "Empty response counter approaching threshold - consider monitoring channel"
             );
         } else if exceeded {
             tracing::warn!(
                 channel_id = channel_id,
-                count = count,
+                count = *count,
                 threshold = self.threshold,
                 "Consecutive empty responses exceeded threshold, marking as failure"
             );
         } else {
             tracing::debug!(
                 channel_id = channel_id,
-                count = count,
+                count = *count,
                 threshold = self.threshold,
                 "Empty response recorded, not yet at threshold"
             );
         }
+        exceeded
     }
 
     /// Reset counter on successful response (non-empty).
     pub fn reset(&self, channel_id: &str) {
-        let mut counters = self.counters.write().unwrap_or_else(|e| e.into_inner());
+        let mut counters = self.counters.write().unwrap();
         if let Some(count) = counters.get_mut(channel_id) {
             if *count > 0 {
                 tracing::debug!(
@@ -117,14 +102,14 @@ impl EmptyResponseCounter {
 
     /// Get current counter value for a channel (for monitoring/admin purposes).
     pub fn get_count(&self, channel_id: &str) -> u32 {
-        let counters = self.counters.read().unwrap_or_else(|e| e.into_inner());
+        let counters = self.counters.read().unwrap();
         counters.get(channel_id).copied().unwrap_or(0)
     }
 
     /// Force reset counter for a channel (admin override).
     /// Returns the previous count value.
     pub fn force_reset(&self, channel_id: &str) -> u32 {
-        let mut counters = self.counters.write().unwrap_or_else(|e| e.into_inner());
+        let mut counters = self.counters.write().unwrap();
         let previous_count = counters.remove(channel_id).unwrap_or(0);
         if previous_count > 0 {
             tracing::info!(
@@ -138,18 +123,12 @@ impl EmptyResponseCounter {
 
     /// Get all channels with non-zero counters (for monitoring).
     pub fn get_all_counts(&self) -> Vec<(String, u32)> {
-        let counters = self.counters.read().unwrap_or_else(|e| e.into_inner());
+        let counters = self.counters.read().unwrap();
         counters
             .iter()
             .filter(|(_, &count)| count > 0)
             .map(|(k, &v)| (k.clone(), v))
             .collect()
-    }
-}
-
-impl Default for EmptyResponseCounter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -162,35 +141,30 @@ use axum::{
     Router,
 };
 use balancer::RoundRobinBalancer;
-use burncloud_commerce_billing::{
+use burncloud_common::types::OpenAIChatRequest;
+use burncloud_common::TrafficColor;
+use burncloud_database::Database;
+use burncloud_database_channel::ChannelProviderModel;
+use burncloud_database_router::{
+    CandidateInfo, FailoverAttempt, RouterDatabase, RouterLog, RouterRequestLog,
+    RouterTokenValidationResult, RouterVideoTask, RouterVideoTaskModel, StoragePolicy,
+};
+use burncloud_service_billing::{
     get_parser, parse_chunk_or_default, parse_response_or_default, UnifiedTokenCounter,
 };
-use burncloud_database::Database;
 use burncloud_service_user::UserService;
-use burncloud_supply_channel::ChannelProviderModel;
-use burncloud_traffic_contracts::OpenAIChatRequest;
-use burncloud_traffic_contracts::TrafficColor;
 use channel_state::ChannelStateTracker;
 use circuit_breaker::CircuitBreaker;
 use config::{AuthType, Upstream};
 use futures::stream::StreamExt;
 use http_body_util::BodyExt;
 use limiter::RateLimiter;
-pub use log_service::{BalanceService, BillingService, RouterLogService, UsageStatsService};
 use model_router::ModelRouter;
 use order_type::OrderType;
 use reqwest::Client;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
-pub use storage::{
-    get_billing_summary, get_billing_summary_for_user, get_usage_stats, get_usage_stats_by_model,
-    get_usage_stats_by_token, BalanceModel, BillingModelSummary, BillingSummary, CandidateInfo,
-    FailoverAttempt, ModelUsageStats, RouterDatabase, RouterLog, RouterLogModel, RouterRequestLog,
-    RouterRequestLogModel, RouterToken, RouterTokenModel, RouterTokenValidationResult,
-    RouterVideoTask, RouterVideoTaskModel, StoragePolicy, TokenRotationResult, TokenValidationInfo,
-    UsageStats,
-};
 use tokio::sync::{mpsc, RwLock};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
@@ -222,7 +196,6 @@ const SEEDANCE_DEFAULT_RESOLUTION: &str = "720p";
 const PROTOCOL_OPENAI: &str = "openai";
 const PROTOCOL_CLAUDE: &str = "claude";
 const PROTOCOL_GEMINI: &str = "gemini";
-const PROTOCOL_VERTEX: &str = "vertex";
 const PROTOCOL_ZAI: &str = "zai";
 /// SSE stream termination marker sent to clients.
 const SSE_DONE_MARKER: &str = "data: [DONE]\n\n";
@@ -230,96 +203,6 @@ const SSE_DONE_MARKER: &str = "data: [DONE]\n\n";
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// HTTP request timeout (seconds). Total time for request completion (600 minutes).
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 36000;
-/// Retry budget: upper bound for the entire proxy pipeline, including failover.
-/// Overrides: BURNCLOUD_INTERACTIVE_DEADLINE_SECS and BURNCLOUD_LONG_TASK_DEADLINE_SECS.
-/// An invalid or zero override falls back to the documented defaults.
-/// Long-task policies deliberately retain the existing 10-hour per-request timeout.
-const DEFAULT_INTERACTIVE_DEADLINE_SECS: u64 = 120;
-const DEFAULT_LONG_TASK_DEADLINE_SECS: u64 = 72000;
-/// Reject malformed/unreasonably large retry budget overrides before Tokio
-/// attempts to construct a deadline beyond Instant's supported range.
-const MAX_RETRY_DEADLINE_SECS: u64 = 30 * 24 * 60 * 60;
-
-fn is_interactive_request(path: &str) -> bool {
-    // Explicitly match interactive API families: an unknown endpoint keeps the
-    // long-task budget rather than accidentally truncating video/audio/music jobs.
-    // In particular, OpenAI Responses API must not inherit the 20-hour budget.
-    path.ends_with("/chat/completions")
-        || path.ends_with("/completions")
-        || path.ends_with("/embeddings")
-        || path.ends_with("/responses")
-        || path.ends_with("/messages")
-        || path.ends_with("/moderations")
-        || path.ends_with("/rerank")
-        || path.contains(":generateContent")
-        || path.contains(":streamGenerateContent")
-}
-
-fn parse_retry_budget_secs(raw: Option<&str>, default: u64) -> u64 {
-    raw.and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| (1..=MAX_RETRY_DEADLINE_SECS).contains(v))
-        .unwrap_or(default)
-}
-
-fn retry_budget_secs(path: &str) -> u64 {
-    let (key, default) = if is_interactive_request(path) {
-        (
-            "BURNCLOUD_INTERACTIVE_DEADLINE_SECS",
-            DEFAULT_INTERACTIVE_DEADLINE_SECS,
-        )
-    } else {
-        (
-            "BURNCLOUD_LONG_TASK_DEADLINE_SECS",
-            DEFAULT_LONG_TASK_DEADLINE_SECS,
-        )
-    };
-    parse_retry_budget_secs(std::env::var(key).ok().as_deref(), default)
-}
-
-/// Bound each upstream HTTP request by both its legacy per-attempt limit and
-/// the time left in the request-class retry budget. This remains active while
-/// streaming a response body after proxy_logic returns the response headers.
-///
-/// Long tasks retain the existing 10-hour maximum on the first attempt, but
-/// late failover attempts cannot extend the configured 20-hour total.
-fn remaining_attempt_timeout(
-    total_budget: std::time::Duration,
-    elapsed: std::time::Duration,
-) -> std::time::Duration {
-    total_budget
-        .saturating_sub(elapsed)
-        .min(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
-}
-
-fn retry_attempt_timeout(
-    retry_budget: std::time::Duration,
-    request_start_time: Instant,
-) -> std::time::Duration {
-    remaining_attempt_timeout(retry_budget, request_start_time.elapsed())
-}
-
-/// One cancellable deadline shared by all upstream attempts. A timed-out
-/// future is dropped, releasing any uncommitted BudgetGuard it still owns.
-/// This helper is exercised with a hung future in the router unit tests.
-async fn enforce_retry_deadline<T>(
-    remaining: std::time::Duration,
-    operation: impl std::future::Future<Output = T>,
-) -> Result<T, tokio::time::error::Elapsed> {
-    tokio::time::timeout(remaining, operation).await
-}
-
-/// A stable, structured timeout error for exhausted routing retry budgets.
-fn retry_deadline_error_response() -> Response {
-    build_response_with_header(
-        StatusCode::GATEWAY_TIMEOUT,
-        "content-type",
-        "application/json",
-        Body::from(
-            r#"{"error":{"message":"Router retry budget deadline exceeded","type":"upstream_error","code":"retry_deadline_exceeded"}}"#,
-        ),
-    )
-}
-
 /// HTTP pool idle timeout (seconds). Time before idle connections are closed.
 const HTTP_POOL_IDLE_TIMEOUT_SECS: u64 = 90;
 /// HTTP TCP keepalive interval (seconds).
@@ -407,15 +290,9 @@ struct ProxyResult {
 #[derive(serde::Deserialize)]
 struct JwtClaims {
     sub: String,
-    #[allow(
-        dead_code,
-        reason = "deserialized for JWT claim compatibility; only `sub` is read here"
-    )]
+    #[allow(dead_code)]
     exp: usize,
-    #[allow(
-        dead_code,
-        reason = "deserialized for JWT claim compatibility; only `sub` is read here"
-    )]
+    #[allow(dead_code)]
     iat: usize,
 }
 
@@ -456,7 +333,7 @@ fn record_upstream_failure(
             | FailureType::ConnectionError
             | FailureType::EmptyResponse
     );
-    if should_evict && !session_id.is_empty() {
+    if should_evict {
         if let Some(model) = model_name {
             state.affinity_cache.evict(session_id, model);
             tracing::debug!(
@@ -483,7 +360,7 @@ fn record_upstream_success(
 ) {
     state.circuit_breaker.record_success(&upstream.id);
     let channel_id: i32 = upstream.id.parse().unwrap_or(0);
-    if let Some(model) = model_name.filter(|_| !session_id.is_empty()) {
+    if let Some(model) = model_name {
         state.affinity_cache.insert(session_id, model, channel_id);
     }
 }
@@ -492,10 +369,7 @@ fn record_upstream_success(
 ///
 /// Returns `true` if empty response was detected (caller should continue to next candidate),
 /// `false` if response has valid tokens (caller should proceed normally).
-#[allow(
-    dead_code,
-    reason = "kept as the non-streaming counterpart of the inline streaming empty-response check"
-)]
+#[allow(dead_code)]
 fn check_empty_response(
     state: &AppState,
     upstream: &Upstream,
@@ -705,10 +579,7 @@ fn sanitize_request_headers(headers: &axum::http::HeaderMap) -> Option<String> {
 }
 
 /// Sanitize response body for logging: truncate if too large.
-#[allow(
-    dead_code,
-    reason = "logging helper retained for request-log backends that sanitize response bodies"
-)]
+#[allow(dead_code)]
 fn sanitize_response_body(body: &[u8]) -> (Option<String>, bool) {
     if body.is_empty() {
         return (None, false);
@@ -804,7 +675,7 @@ fn build_response_with_header(
 }
 
 /// Startup helper: load every channel's L2 Shaper config (rpm_cap / tpm_cap /
-/// reservation triple) through the Supply Channel owner and feed it into
+/// reservation triple) from `channel_providers` and feed it into
 /// [`rate_budget::InMemoryBudget`]. Channels with `rpm_cap = NULL` (or zero)
 /// stay unconfigured — they'll fail-open at request time, and that count is
 /// surfaced via `tracing::warn!` here and `fail_open_count` at runtime.
@@ -814,26 +685,57 @@ fn build_response_with_header(
 /// `try_consume` calls all hit unconfigured-channel fail-open until the next
 /// reload.
 async fn configure_rate_budget_from_db(db: &Database, budget: &rate_budget::InMemoryBudget) {
-    let rows = match fetch_channel_cap_rows(db).await {
-        Some(rows) => rows,
-        None => return,
+    let conn = match db.get_connection() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "rate_budget: failed to acquire DB connection at startup — all channels will fail-open"
+            );
+            return;
+        }
+    };
+    let pool = conn.pool();
+
+    type ChannelCapRow = (
+        i32,
+        Option<i32>,
+        Option<i64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+    let rows: Vec<ChannelCapRow> = match burncloud_database::sqlx::query_as(
+        "SELECT id, rpm_cap, tpm_cap, reservation_green, reservation_yellow, reservation_red \
+             FROM channel_providers",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "rate_budget: failed to query channel_providers at startup — all channels will fail-open"
+            );
+            return;
+        }
     };
 
     let mut configured_count: usize = 0;
     let mut unconfigured_count: usize = 0;
     let mut sample_unconfigured_ids: Vec<i32> = Vec::new();
 
-    for row in rows {
-        let id = row.id;
-        match (row.rpm_cap, row.tpm_cap) {
+    for (id, rpm_cap, tpm_cap, res_g, res_y, res_r) in rows {
+        match (rpm_cap, tpm_cap) {
             (Some(rpm), Some(tpm)) if rpm > 0 && tpm > 0 => {
                 // Per-color shares: NULL → migration default (0.4/0.4/0.2).
                 // `configure` itself validates sum-to-1.0 and falls back to
                 // default if invalid (FM8 fix in subtask 4).
                 let reservation = rate_budget::ChannelReservation {
-                    green: row.reservation_green.unwrap_or(0.4),
-                    yellow: row.reservation_yellow.unwrap_or(0.4),
-                    red: row.reservation_red.unwrap_or(0.2),
+                    green: res_g.unwrap_or(0.4),
+                    yellow: res_y.unwrap_or(0.4),
+                    red: res_r.unwrap_or(0.2),
                 };
                 budget.configure(id, rpm as u32, tpm as u64, reservation);
                 configured_count += 1;
@@ -847,39 +749,9 @@ async fn configure_rate_budget_from_db(db: &Database, budget: &rate_budget::InMe
         }
     }
 
-    log_rate_budget_config(
-        configured_count,
-        unconfigured_count,
-        &sample_unconfigured_ids,
-    );
-}
-
-/// Read the Supply-owned channel rate-cap projection. Returns `None` (all channels
-/// fail-open) when the owner capability cannot load the data.
-async fn fetch_channel_cap_rows(
-    db: &Database,
-) -> Option<Vec<burncloud_supply_channel::ChannelRateCap>> {
-    match burncloud_supply_channel::ChannelService::list_rate_caps(db).await {
-        Ok(rows) => Some(rows),
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "rate_budget: failed to load Supply channel cap projection at startup — all channels will fail-open"
-            );
-            None
-        }
-    }
-}
-
-/// Report how many channels ended up with a configured shaper budget.
-fn log_rate_budget_config(
-    configured_count: usize,
-    unconfigured_count: usize,
-    sample_unconfigured_ids: &[i32],
-) {
     tracing::info!(
         configured_count,
-        "rate_budget: loaded channel cap configs from Supply"
+        "rate_budget: loaded channel cap configs from channel_providers"
     );
     if unconfigured_count > 0 {
         tracing::warn!(
@@ -901,10 +773,6 @@ pub async fn create_router_app(
     create_router_app_with_route_miss(db, jwt_secret, Arc::new(|_| None)).await
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "single linear application-assembly routine; splitting would scatter the wiring of shared state"
-)]
 pub async fn create_router_app_with_route_miss(
     db: Arc<Database>,
     jwt_secret: burncloud_service_user::JwtSecret,
@@ -914,9 +782,6 @@ pub async fn create_router_app_with_route_miss(
     Router,
     mpsc::Sender<tokio::sync::oneshot::Sender<price_sync::SyncResult>>,
 )> {
-    local_attachment::LocalAttachmentState::for_database(&db)
-        .configure(local_attachment::configured_concurrency()?)?;
-    let configured_policies = scheduler::load_scheduler_config()?;
     let client = Client::builder()
         .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
@@ -939,13 +804,13 @@ pub async fn create_router_app_with_route_miss(
     // API Version Detector for handling deprecated versions
     let api_version_detector = Arc::new(adaptor::detector::ApiVersionDetector::new(db.clone()));
     // Price cache + cost calculator (loaded at startup; refreshed on POST /api/v1/prices)
-    let price_cache = burncloud_commerce_billing::PriceCache::load(&db)
+    let price_cache = burncloud_service_billing::PriceCache::load(&db)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!("Failed to load price cache at startup: {e} — using empty cache");
-            burncloud_commerce_billing::PriceCache::empty()
+            burncloud_service_billing::PriceCache::empty()
         });
-    let cost_calculator = burncloud_commerce_billing::CostCalculator::new(price_cache.clone());
+    let cost_calculator = burncloud_service_billing::CostCalculator::new(price_cache.clone());
 
     // Exchange Rate Service for multi-currency cost calculations
     let exchange_rate_service = Arc::new(exchange_rate::ExchangeRateService::new(db.clone()));
@@ -958,7 +823,7 @@ pub async fn create_router_app_with_route_miss(
     });
 
     // Scheduler policies for multi-channel routing
-    let scheduler_policies = Arc::new(RwLock::new(configured_policies));
+    let scheduler_policies = Arc::new(RwLock::new(scheduler::load_scheduler_config()));
 
     // L3 Affinity flow cache (HRW + dual TTL: 5min sticky / 30min hard).
     let affinity_cache = Arc::new(affinity::AffinityCache::default());
@@ -1217,7 +1082,7 @@ async fn circuit_breaker_trip_all_handler(State(state): State<AppState>) -> Resp
 async fn models_handler(State(state): State<AppState>) -> Response {
     // Fetch all distinct models from channel_abilities
     // This shows models that have at least one enabled channel
-    use burncloud_supply_channel::ChannelService;
+    use burncloud_database_channel::ChannelAbilityModel;
 
     let mut model_entries = Vec::new();
     let current_time = std::time::SystemTime::now()
@@ -1225,7 +1090,7 @@ async fn models_handler(State(state): State<AppState>) -> Response {
         .unwrap_or_default()
         .as_secs();
 
-    if let Ok(models) = ChannelService::list_distinct_models(&state.db).await {
+    if let Ok(models) = ChannelAbilityModel::list_distinct_models(&state.db).await {
         for model in models {
             model_entries.push(serde_json::json!({
                 "id": model,
@@ -1260,17 +1125,17 @@ async fn models_handler(State(state): State<AppState>) -> Response {
 async fn extract_token_user(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<String, Box<Response>> {
+) -> Result<String, Response> {
     let token = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            Box::new(build_response(
+            build_response(
                 StatusCode::UNAUTHORIZED,
                 Body::from(r#"{"error":"Missing Bearer token"}"#),
-            ))
+            )
         })?;
 
     match RouterDatabase::validate_token_and_get_info(&state.db, &token).await {
@@ -1284,22 +1149,22 @@ async fn extract_token_user(
                     let decoded = state.jwt_secret.verify::<JwtClaims>(&token);
                     match decoded {
                         Ok(claims) => Ok(claims.sub),
-                        _ => Err(Box::new(build_response(
+                        _ => Err(build_response(
                             StatusCode::UNAUTHORIZED,
                             Body::from(
                                 r#"{"error":{"message":"Invalid Token","type":"invalid_request_error","code":"invalid_token"}}"#,
                             ),
-                        ))),
+                        )),
                     }
                 }
             }
         }
         Err(e) => {
             tracing::error!("Token validation DB error: {e}");
-            Err(Box::new(build_response(
+            Err(build_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Body::from(r#"{"error":"Service temporarily unavailable"}"#),
-            )))
+            ))
         }
     }
 }
@@ -1308,10 +1173,10 @@ async fn extract_token_user(
 async fn usage_handler(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let user_id = match extract_token_user(&state, &headers).await {
         Ok(id) => id,
-        Err(resp) => return *resp,
+        Err(resp) => return resp,
     };
 
-    match crate::storage::get_usage_stats(&state.db, &user_id, "month").await {
+    match burncloud_database_router::get_usage_stats(&state.db, &user_id, "month").await {
         Ok(stats) => build_response_with_header(
             StatusCode::OK,
             "content-type",
@@ -1340,10 +1205,10 @@ async fn usage_models_handler(
 ) -> Response {
     let user_id = match extract_token_user(&state, &headers).await {
         Ok(id) => id,
-        Err(resp) => return *resp,
+        Err(resp) => return resp,
     };
 
-    match crate::storage::get_usage_stats_by_model(&state.db, &user_id, "month").await {
+    match burncloud_database_router::get_usage_stats_by_model(&state.db, &user_id, "month").await {
         Ok(rows) => build_response_with_header(
             StatusCode::OK,
             "content-type",
@@ -1414,10 +1279,10 @@ fn normalize_doubled_path(path: &str) -> String {
 /// Exposed as `pub(crate)` so unit tests can call it without a running server.
 pub(crate) fn inject_video_tokens_if_empty(
     status: axum::http::StatusCode,
-    mut usage: burncloud_commerce_billing::UnifiedUsage,
+    mut usage: burncloud_service_billing::UnifiedUsage,
     video_tokens: i64,
     source: &str,
-) -> burncloud_commerce_billing::UnifiedUsage {
+) -> burncloud_service_billing::UnifiedUsage {
     if status.is_success() && usage.is_empty() && video_tokens > 0 {
         usage.video_tokens = video_tokens;
         tracing::info!(
@@ -1441,9 +1306,6 @@ async fn health_status_handler(State(state): State<AppState>) -> Response {
             map.insert(
                 group.clone(),
                 match kind {
-                    scheduler::SchedulerKind::Balanced => "balanced".to_string(),
-                    scheduler::SchedulerKind::StabilityFirst => "stability_first".to_string(),
-                    scheduler::SchedulerKind::PriceFirst => "price_first".to_string(),
                     scheduler::SchedulerKind::Passthrough => "passthrough".to_string(),
                     scheduler::SchedulerKind::Combined { config } => format!(
                         "combined(h={:.1},c={:.1},r={:.1})",
@@ -1528,11 +1390,6 @@ async fn health_status_handler(State(state): State<AppState>) -> Response {
     )
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    reason = "single sequential auth-then-proxy handler; splitting requires a dedicated behavior-preserving refactor"
-)]
 async fn proxy_handler(
     State(state): State<AppState>,
     method: Method,
@@ -1575,13 +1432,12 @@ async fn proxy_handler(
     let (user_id, user_group, quota_limit, used_quota, order_type_str, price_cap) =
         match RouterDatabase::validate_token_and_get_info(&state.db, &user_token).await {
             Ok(Some(info)) => {
-                // Best-effort accessed_time update. Await it here so this SQLite write
-                // cannot race the later spend settlement for the same request (#774).
-                if let Err(err) =
-                    RouterDatabase::update_token_accessed_time(&state.db, &user_token).await
-                {
-                    tracing::debug!("update_token_accessed_time (new token table): {err}");
-                }
+                // Update accessed_time non-blocking
+                let db = state.db.clone();
+                let token = user_token.clone();
+                tokio::spawn(async move {
+                    let _ = RouterDatabase::update_token_accessed_time(&db, &token).await;
+                });
                 (
                     info.user_id,
                     info.group,
@@ -1595,15 +1451,12 @@ async fn proxy_handler(
                 // Fallback to old token table logic with detailed validation
                 match RouterDatabase::validate_token_detailed(&state.db, &user_token).await {
                     Ok(RouterTokenValidationResult::Valid(t)) => {
-                        // Best-effort accessed_time update. Await it here so this SQLite write
-                        // cannot race the later spend settlement for the same request (#774).
-                        if let Err(err) =
-                            RouterDatabase::update_token_accessed_time(&state.db, &user_token).await
-                        {
-                            tracing::debug!(
-                                "update_token_accessed_time (legacy token table): {err}"
-                            );
-                        }
+                        // Update accessed_time non-blocking
+                        let db = state.db.clone();
+                        let token = user_token.clone();
+                        tokio::spawn(async move {
+                            let _ = RouterDatabase::update_token_accessed_time(&db, &token).await;
+                        });
                         (
                             t.user_id,
                             "default".to_string(),
@@ -1723,8 +1576,13 @@ async fn proxy_handler(
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
         })
-        // 只有 Gemini 路径提取器处理方法后缀；JSON 模型别名中的冒号必须原样保留。
-        .or_else(|| crate::passthrough::extract_model_from_gemini_path(&path));
+        .or_else(|| crate::passthrough::extract_model_from_gemini_path(&path))
+        // Strip Gemini method suffixes like ":generateContent", ":streamGenerateContent"
+        .map(|s| {
+            s.split_once(':')
+                .map(|(base, _)| base.to_string())
+                .unwrap_or(s)
+        });
 
     // Extract Veo-specific fields for request-side billing.
     // Veo's predictLongRunning response has no usageMetadata; duration is in the request body.
@@ -1877,15 +1735,8 @@ async fn proxy_handler(
     // Create unified token counter for streaming response parsing
     let token_counter = Arc::new(UnifiedTokenCounter::new());
 
-    // Enforce one deadline across all failover attempts, rather than resetting
-    // a full client timeout for every upstream. Dropping the timed-out future
-    // also drops any live BudgetGuard, refunding uncommitted TPM reservations.
-    let retry_budget_secs = retry_budget_secs(&path);
-    // Snapshot the policy once: a runtime config change must not extend a
-    // response stream beyond the deadline assigned when it was admitted.
-    let retry_budget = std::time::Duration::from_secs(retry_budget_secs);
-    let remaining = retry_budget.saturating_sub(start_time.elapsed());
-    let proxy_future = proxy_logic(
+    // Perform Proxy Logic
+    let result = proxy_logic(
         &state,
         method,
         uri,
@@ -1899,32 +1750,8 @@ async fn proxy_handler(
         token_counter.clone(),
         model_name.as_deref(),
         start_time,
-        retry_budget,
-    );
-    let result = match enforce_retry_deadline(remaining, proxy_future).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::warn!(
-                request_id = %request_id,
-                path = %path,
-                retry_budget_secs,
-                elapsed_ms = start_time.elapsed().as_millis() as u64,
-                "Router retry budget deadline exceeded; abandoning failover"
-            );
-            ProxyResult {
-                response: retry_deadline_error_response(),
-                upstream_id: None,
-                final_status: StatusCode::GATEWAY_TIMEOUT,
-                pricing_region: None,
-                video_task_id: None,
-                shaper_outcome: None,
-                routing_decision: None,
-                sched_request_color: TrafficColor::Yellow,
-                error_type: Some("timeout".to_string()),
-                request_log_data: None,
-            }
-        }
-    };
+    )
+    .await;
 
     // Save video task mapping asynchronously (fire-and-forget)
     if let Some(task_id) = result.video_task_id {
@@ -1993,7 +1820,7 @@ async fn proxy_handler(
                     let total = result.usd_amount_nano;
                     (total, result.breakdown, Some("ok".to_string()))
                 }
-                Err(burncloud_commerce_billing::BillingError::PriceNotFound(m)) => {
+                Err(burncloud_service_billing::BillingError::PriceNotFound(m)) => {
                     tracing::warn!(model = %m, "PriceNotFound — no price configured for this model");
                     state
                         .billing_post_settle_price_missing_count
@@ -2062,34 +1889,6 @@ async fn proxy_handler(
         "request completed"
     );
 
-    // Settle the request before handing logs to background writers.
-    //
-    // This used to be fire-and-forget after both log channels were notified. On SQLite,
-    // the settlement transaction could then race those writers and fail after the client
-    // had already received a successful response. #774 makes spend settlement part of
-    // request completion again while keeping the log writes asynchronous.
-    if cost > 0 {
-        match RouterDatabase::deduct_quota(&state.db, &user_id, &user_token, cost).await {
-            Ok(within_limit) => {
-                if !within_limit {
-                    tracing::debug!(
-                        user_id = %user_id,
-                        cost,
-                        "request settlement completed and exhausted the credential quota"
-                    );
-                }
-            }
-            Err(err) => {
-                tracing::error!(
-                    user_id = %user_id,
-                    cost,
-                    error = %err,
-                    "request settlement failed"
-                );
-            }
-        }
-    }
-
     let log = RouterLog {
         id: 0, // Auto-generated by database
         request_id: request_id.clone(),
@@ -2113,10 +1912,10 @@ async fn proxy_handler(
         embedding_tokens: usage.embedding_tokens as i32,
         input_cost: cost_breakdown.input_cost,
         output_cost: cost_breakdown.output_cost,
-        // #618: the calculator splits read from write; write each to its own
-        // column so cache-write spend is not reported as 0 / merged into read.
-        cache_read_cost: cost_breakdown.cache_read_cost,
-        cache_write_cost: cost_breakdown.cache_write_cost,
+        // TODO: promote cache_read_cost/cache_write_cost to separate CostBreakdown fields
+        // (calculator.rs already computes them separately before merging; see compute_breakdown)
+        cache_read_cost: cost_breakdown.cache_cost, // currently stores read+write merged
+        cache_write_cost: 0,
         audio_cost: cost_breakdown.audio_cost,
         image_cost: cost_breakdown.image_cost,
         video_cost: cost_breakdown.video_cost,
@@ -2175,9 +1974,20 @@ async fn proxy_handler(
         };
 
         // Use try_send to avoid blocking if channel is full
-        if let Err(err) = state.request_log_tx.try_send(request_log) {
-            tracing::debug!("request log dropped (channel full or closed): {err}");
-        }
+        let _ = state.request_log_tx.try_send(request_log);
+    }
+
+    // Deduct quota (non-blocking)
+    // Use cost > 0 (not total_tokens > 0) so video/audio/music requests are also deducted.
+    // total_tokens only counts text tokens; multi-modal costs flow through cost (nanodollars).
+    if cost > 0 {
+        let db = state.db.clone();
+        let token_for_quota = user_token.to_string();
+        let user_id_for_quota = user_id.clone();
+        tokio::spawn(async move {
+            let _ =
+                RouterDatabase::deduct_quota(&db, &user_id_for_quota, &token_for_quota, cost).await;
+        });
     }
 
     // Inject route-tracing headers for client-side observability.
@@ -2204,7 +2014,7 @@ async fn proxy_handler(
     response
 }
 
-use burncloud_supply_contracts::ChannelType;
+use burncloud_common::types::ChannelType;
 use circuit_breaker::FailureType;
 use passthrough::{should_passthrough, PassthroughDecision};
 use rate_budget::{BudgetBackend, BudgetGuard, ConsumeOutcome};
@@ -2229,12 +2039,7 @@ struct ShaperContext {
     rejected_count: u32,
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    reason = "single sequential proxy pipeline carrying per-request context; splitting requires a dedicated behavior-preserving refactor"
-)]
+#[allow(clippy::too_many_arguments)]
 async fn proxy_logic(
     state: &AppState,
     method: Method,
@@ -2249,7 +2054,6 @@ async fn proxy_logic(
     token_counter: Arc<UnifiedTokenCounter>,
     model_name: Option<&str>,
     request_start_time: Instant,
-    retry_budget: std::time::Duration,
 ) -> ProxyResult {
     // Initialize request log data collection (Issue #334)
     // Only collect detailed data when storage policy is not 'none'
@@ -2271,15 +2075,6 @@ async fn proxy_logic(
 
     // Model Routing
     let mut candidates: Vec<Upstream> = Vec::new();
-    let mut strict_plan = None;
-    let mut selection_error = None;
-    let mut sends = 0_u32;
-    // 请求快照保留本机身份，摘除后不能因内存索引缺失而退回普通供给路径。
-    let mut local_candidates = std::collections::HashSet::<i32>::new();
-    let local = state.model_router.local_attachment_state();
-    let mut local_rejected = false;
-    let mut upstream_attempted = false;
-    let mut local_client_failed = false;
     // True only when ModelRouter itself returned zero candidates for the model.
     // Later protocol/path filtering must not be reclassified as a Node route miss.
     let mut model_router_missed = false;
@@ -2305,7 +2100,7 @@ async fn proxy_logic(
 
     // Extract session_id from conversation_id in request body (P0 affinity wiring).
     // Falls back to user_id so affinity still works when no conversation_id is set.
-    let mut session_id: String = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+    let session_id: String = serde_json::from_slice::<serde_json::Value>(&body_bytes)
         .ok()
         .and_then(|v| {
             v.get("conversation_id")
@@ -2331,12 +2126,6 @@ async fn proxy_logic(
                 let policies = state.scheduler_policies.read().await;
                 policies.get(&user_group.to_lowercase()).cloned()
             };
-            if scheduler_kind
-                .as_ref()
-                .is_none_or(scheduler::SchedulerKind::is_strict)
-            {
-                session_id.clear();
-            }
             // Lock released here — before SQL queries in route_with_scheduler
 
             // L1 Classifier: resolve color via service-user (audit decision
@@ -2373,7 +2162,7 @@ async fn proxy_logic(
 
             match state
                 .model_router
-                .route_for_dispatch(model_router::RouteInputs {
+                .route_with_scheduler(model_router::RouteInputs {
                     group: user_group,
                     model,
                     state_tracker: &state.channel_state_tracker,
@@ -2385,8 +2174,7 @@ async fn proxy_logic(
                 })
                 .await
             {
-                Ok((channels, routing_decision, plan)) if !channels.is_empty() => {
-                    strict_plan = plan;
+                Ok((channels, routing_decision)) if !channels.is_empty() => {
                     tracing::debug!(
                         "ModelRouter: Got {} candidates for {}",
                         channels.len(),
@@ -2411,8 +2199,6 @@ async fn proxy_logic(
                         // Skip channel if path format does not match channel type
                         if is_openai_path
                             && !matches!(channel_type, ChannelType::OpenAI | ChannelType::Zai)
-                            && !(channel_type == ChannelType::VertexAi
-                                && path.starts_with("/v1/chat/completions"))
                         {
                             tracing::debug!(
                                 "Skipping {:?} channel for OpenAI format path: {}",
@@ -2435,18 +2221,12 @@ async fn proxy_logic(
                             ChannelType::Anthropic => {
                                 (AuthType::Claude, PROTOCOL_CLAUDE.to_string())
                             }
-                            ChannelType::Gemini => {
+                            ChannelType::Gemini | ChannelType::VertexAi => {
                                 (AuthType::GoogleAI, PROTOCOL_GEMINI.to_string())
-                            }
-                            ChannelType::VertexAi => {
-                                (AuthType::GoogleAI, PROTOCOL_VERTEX.to_string())
                             }
                             ChannelType::Zai => (AuthType::Bearer, PROTOCOL_ZAI.to_string()),
                             _ => (AuthType::Bearer, PROTOCOL_OPENAI.to_string()),
                         };
-                        if channel.tag.as_deref() == Some("burncloud-node-local") {
-                            local_candidates.insert(channel.id);
-                        }
                         let ch_id = channel.id.to_string();
                         candidates.push(Upstream {
                             id: ch_id,
@@ -2610,10 +2390,7 @@ async fn proxy_logic(
     }
 
     let mut last_error = String::new();
-    #[allow(
-        unused_assignments,
-        reason = "assigned on every failover iteration but only read after the loop"
-    )]
+    #[allow(unused_assignments)]
     let mut last_upstream_id = None;
 
     // L2 Shaper bookkeeping (issue #151) shared across the failover loop.
@@ -2649,34 +2426,7 @@ async fn proxy_logic(
         }
     }
 
-    let mut visited = 0_usize;
-    while !candidates.is_empty() && (strict_plan.is_none() || sends < 5) {
-        let position = if let Some(plan) = &strict_plan {
-            match plan.pick(
-                candidates.iter().filter_map(|u| u.id.parse().ok()),
-                &state.channel_state_tracker,
-                |id| state.circuit_breaker.is_available(&id.to_string()),
-            ) {
-                Ok(id) => candidates
-                    .iter()
-                    .position(|u| u.id == id.to_string())
-                    .unwrap_or_else(|| unreachable!()),
-                Err(error) => {
-                    selection_error = Some(error);
-                    break;
-                }
-            }
-        } else {
-            0
-        };
-        let selected_upstream = candidates.remove(position);
-        let upstream = &selected_upstream;
-        let attempt = if strict_plan.is_some() {
-            sends as usize
-        } else {
-            visited
-        };
-        visited += 1;
+    for (attempt, upstream) in candidates.iter().enumerate() {
         // L5 Failover: override routing decision when attempt > 0.
         if attempt > 0 {
             sched_routing_decision = Some(model_router::RoutingDecision::Failover {
@@ -2696,7 +2446,6 @@ async fn proxy_logic(
         // for the rest of the iteration: success → `commit(est_tpm)`; any
         // continue / panic / cancel → `Drop` refunds full est_tpm (audit FM4).
         let channel_id_i32: i32 = upstream.id.parse().unwrap_or(0);
-        let is_local = local_candidates.contains(&channel_id_i32);
         let mut budget_guard: Option<BudgetGuard<'_>> = None;
         let iter_label: &'static str = if !state.rate_budget.is_configured(channel_id_i32) {
             state
@@ -2724,21 +2473,14 @@ async fn proxy_logic(
                     Some("L2 Shaper rejected"),
                     0,
                 );
-                last_error = format!(
-                    "Local rejection on channel {} ({}): L2 Shaper rejected candidate",
-                    upstream.id, upstream.name
-                );
                 continue;
             }
-            budget_guard = outcome.sourced().map(|source| {
-                BudgetGuard::with_source(
-                    state.rate_budget.as_ref(),
-                    channel_id_i32,
-                    shaper_ctx.color,
-                    shaper_ctx.est_tpm,
-                    source,
-                )
-            });
+            budget_guard = Some(BudgetGuard::new(
+                state.rate_budget.as_ref(),
+                channel_id_i32,
+                shaper_ctx.color,
+                shaper_ctx.est_tpm,
+            ));
             outcome.as_label()
         };
         shaper_ctx.outcome = Some(iter_label);
@@ -2746,10 +2488,7 @@ async fn proxy_logic(
         // Circuit Breaker Check
         if !state.circuit_breaker.allow_request(&upstream.id) {
             tracing::debug!("Skipping upstream {} (Circuit Open)", upstream.name);
-            last_error = format!(
-                "Circuit breaker skip on channel {} ({}): circuit is open",
-                upstream.id, upstream.name
-            );
+            last_error = format!("Circuit Breaker Open for {}", upstream.name);
             // Record failover attempt (Issue #334)
             record_failover_attempt(
                 &mut request_log_data,
@@ -2762,23 +2501,6 @@ async fn proxy_logic(
             // reached upstream, so the reservation is returned to the bucket).
             continue;
         }
-
-        let mut local_probe_guard =
-            is_local.then(|| state.circuit_breaker.probe_guard(&upstream.id));
-
-        // 本机客户端只在管理状态中缓存；普通上游仍使用原客户端。
-        let client = if is_local {
-            match local.local_client().await {
-                Ok(client) => client,
-                Err(error) => {
-                    local_client_failed = true;
-                    last_error = format!("Local HTTP client initialization failed: {error}");
-                    continue;
-                }
-            }
-        } else {
-            &state.client
-        };
 
         // 2. Construct Target URL
         // Note: Some adaptors might override URL, but we set base here.
@@ -2809,10 +2531,7 @@ async fn proxy_logic(
         let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
             Ok(v) => v,
             Err(_) => {
-                last_error = format!(
-                    "Request error on channel {} ({}): invalid JSON body",
-                    upstream.id, upstream.name
-                );
+                last_error = "Invalid JSON body".to_string();
                 continue;
             }
         };
@@ -2837,29 +2556,24 @@ async fn proxy_logic(
                     .get("stream")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let req = client
+                let req = state
+                    .client
                     .request(method.clone(), &url)
                     .header("x-api-key", &upstream.api_key)
                     .header("anthropic-version", "2023-06-01");
                 (req, is_stream, false)
             } else if channel_type == ChannelType::OpenAI {
-                // 本机根地址补 /v1；非本机沿用既有 /chat/completions 约定。
+                // OpenAI passthrough: forward to base_url + /chat/completions
                 let base = upstream.base_url.trim_end_matches('/');
-                let url = if is_local {
-                    format!("{base}/v1/chat/completions")
-                } else {
-                    format!("{base}/chat/completions")
-                };
+                let url = format!("{base}/chat/completions");
                 let is_stream = body_json
                     .get("stream")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let req = client.request(method.clone(), &url);
-                let req = if is_local {
-                    req
-                } else {
-                    req.header("Authorization", format!("Bearer {}", upstream.api_key))
-                };
+                let req = state
+                    .client
+                    .request(method.clone(), &url)
+                    .header("Authorization", format!("Bearer {}", &upstream.api_key));
                 (req, is_stream, false)
             } else {
                 // Gemini passthrough
@@ -2880,7 +2594,8 @@ async fn proxy_logic(
                     passthrough_url.clone()
                 };
                 tracing::debug!("Passthrough URL: {}", final_url);
-                let req = client
+                let req = state
+                    .client
                     .request(method.clone(), &final_url)
                     .header("x-goog-api-key", &upstream.api_key);
                 (req, is_stream, true)
@@ -2898,96 +2613,19 @@ async fn proxy_logic(
             }
 
             // Apply header_override
-            let req_builder = if is_local {
-                req_builder
-            } else {
-                apply_header_override(req_builder, upstream.header_override.as_deref())
-            };
+            let req_builder =
+                apply_header_override(req_builder, upstream.header_override.as_deref());
 
             let req_builder = req_builder.json(&passthrough_body);
-            // Enforce the remaining total budget through SSE body reads as
-            // well as request setup, without extending the legacy 10-hour cap.
-            let req_builder =
-                req_builder.timeout(retry_attempt_timeout(retry_budget, request_start_time));
 
             // Execute passthrough request
-            // 本机许可与响应体一起转移，handler 返回不会提前释放并发槽。
-            if is_local {
-                let Some(permit) = local.try_acquire(
-                    channel_id_i32,
-                    model_name.unwrap_or_default(),
-                    &upstream.base_url,
-                ) else {
-                    local_rejected = true;
-                    last_error = format!("Local attachment {} rejected by admission", upstream.id);
-                    continue;
-                };
-                sends += 1;
-                upstream_attempted = true;
-                let exchange = local_dispatch::LocalExchange::new(
-                    state,
-                    upstream,
-                    model_name.unwrap_or_default(),
-                    &session_id,
-                    permit,
-                    Arc::clone(&token_counter),
-                );
-                match exchange
-                    .send(
-                        req_builder,
-                        is_stream,
-                        request_start_time.checked_add(retry_budget),
-                        local_probe_guard.take(),
-                    )
-                    .await
-                {
-                    Ok(response) => {
-                        let status = response.status();
-                        if status.is_success() {
-                            if let Some(guard) = budget_guard.take() {
-                                let actual = token_counter.get_usage().total_tokens() as u64;
-                                guard.commit(if is_stream || actual == 0 {
-                                    shaper_ctx.est_tpm
-                                } else {
-                                    actual
-                                });
-                            }
-                        }
-                        return ProxyResult {
-                            response,
-                            upstream_id: last_upstream_id,
-                            final_status: status,
-                            pricing_region: selected_pricing_region.clone(),
-                            video_task_id: None,
-                            shaper_outcome: Some((
-                                iter_label.to_string(),
-                                shaper_ctx.color.as_char().to_string(),
-                            )),
-                            routing_decision: sched_routing_decision.clone(),
-                            sched_request_color: shaper_color,
-                            error_type: (!status.is_success())
-                                .then(|| "upstream_error".to_string()),
-                            request_log_data: None,
-                        };
-                    }
-                    Err(error) => {
-                        last_error = error;
-                        continue;
-                    }
-                }
-            }
-            sends += 1;
-            upstream_attempted = true;
             match req_builder.send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     let resp_headers = resp.headers().clone();
 
                     if status.is_server_error() {
-                        last_error = format!(
-                            "Upstream status on channel {} ({}): {}",
-                            upstream.id, upstream.name, status
-                        );
+                        last_error = format!("Upstream returned {status}");
                         record_upstream_failure(
                             state,
                             upstream,
@@ -3019,16 +2657,10 @@ async fn proxy_logic(
                                 rate_limit_info.request_limit,
                             )
                             .inspect(|&learned| {
-                                if let Err(err) =
-                                    state.budget_update_tx.try_send(state::BudgetUpdate {
-                                        channel_id,
-                                        learned_limit: learned,
-                                    })
-                                {
-                                    tracing::debug!(
-                                        "budget update dropped (channel full or closed): {err}"
-                                    );
-                                }
+                                let _ = state.budget_update_tx.try_send(state::BudgetUpdate {
+                                    channel_id,
+                                    learned_limit: learned,
+                                });
                             });
 
                         // Handle streaming vs non-streaming passthrough
@@ -3069,7 +2701,7 @@ async fn proxy_logic(
                                             );
                                             state.channel_state_tracker.record_error(
                                                 upstream.id.parse().unwrap_or(0),
-                                                model_name,
+                                                model_name.as_deref(),
                                                 &failure_type,
                                                 &format!("SSE error: {}", error_msg),
                                             );
@@ -3078,10 +2710,8 @@ async fn proxy_logic(
                                                     .affinity_cache
                                                     .evict(&session_id.to_string(), model);
                                             }
-                                            last_error = format!(
-                                                "Upstream SSE error on channel {} ({}), code {}: {}",
-                                                upstream.id, upstream.name, error_code, error_msg
-                                            );
+                                            last_error =
+                                                format!("SSE error {}: {}", error_code, error_msg);
                                             peek_error_handled = true;
                                             futures::stream::empty::<
                                                 Result<axum::body::Bytes, reqwest::Error>,
@@ -3100,10 +2730,7 @@ async fn proxy_logic(
                                             &upstream.id,
                                             FailureType::EmptyResponse,
                                         );
-                                        last_error = format!(
-                                            "Empty response on channel {} ({})",
-                                            upstream.id, upstream.name
-                                        );
+                                        last_error = "Empty response".to_string();
                                         peek_error_handled = true;
                                         futures::stream::empty().boxed()
                                     }
@@ -3113,10 +2740,7 @@ async fn proxy_logic(
                                             &upstream.id,
                                             FailureType::ServerError,
                                         );
-                                        last_error = format!(
-                                            "Network error on channel {} ({}): {}",
-                                            upstream.id, upstream.name, e
-                                        );
+                                        last_error = format!("Network error: {}", e);
                                         peek_error_handled = true;
                                         futures::stream::empty().boxed()
                                     }
@@ -3220,7 +2844,7 @@ async fn proxy_logic(
                                             );
 
                                             // Evict affinity so next request tries different channel
-                                            if let Some(model) = model_name_clone.as_ref().filter(|_| !session_id_clone.is_empty()) {
+                                            if let Some(model) = &model_name_clone {
                                                 state_clone.affinity_cache.evict(&session_id_clone, model);
                                             }
                                         }
@@ -3229,7 +2853,7 @@ async fn proxy_logic(
                                         state_clone.empty_response_counter.reset(&upstream_id_str);
                                         // Now we can safely record success for the streaming response
                                         state_clone.circuit_breaker.record_success(&upstream_id_str);
-                                        if let Some(model) = model_name_clone.as_ref().filter(|_| !session_id_clone.is_empty()) {
+                                        if let Some(model) = &model_name_clone {
                                             state_clone.affinity_cache.insert(&session_id_clone, model, channel_id);
                                         }
                                     }
@@ -3275,10 +2899,7 @@ async fn proxy_logic(
                             let resp_bytes = match resp.bytes().await {
                                 Ok(b) => b,
                                 Err(e) => {
-                                    last_error = format!(
-                                        "Response read error on channel {} ({}): {}",
-                                        upstream.id, upstream.name, e
-                                    );
+                                    last_error = format!("Failed to read response: {e}");
                                     tracing::warn!(
                                         "Passthrough: {} response read failed: {}",
                                         upstream.name,
@@ -3336,9 +2957,7 @@ async fn proxy_logic(
                                     );
 
                                     // Evict from affinity cache so next request tries a different channel
-                                    if let Some(model) =
-                                        model_name.filter(|_| !session_id.is_empty())
-                                    {
+                                    if let Some(model) = model_name {
                                         state.affinity_cache.evict(&session_id, model);
                                     }
                                     tracing::info!(
@@ -3346,10 +2965,7 @@ async fn proxy_logic(
                                         upstream.name
                                     );
 
-                                    last_error = format!(
-                                        "Upstream error on channel {} ({}): {}",
-                                        upstream.id, upstream.name, error_message
-                                    );
+                                    last_error = error_message.to_string();
                                     continue; // Try next candidate
                                 }
 
@@ -3380,10 +2996,6 @@ async fn proxy_logic(
                                     model = ?model_name,
                                     quality = ?quality,
                                     "Response quality check failed for passthrough"
-                                );
-                                last_error = format!(
-                                    "Response quality failure on channel {} ({}): {:?}",
-                                    upstream.id, upstream.name, quality
                                 );
                                 continue; // Try next candidate
                             }
@@ -3490,10 +3102,7 @@ async fn proxy_logic(
                                 upstream.name,
                                 status.as_u16()
                             );
-                            last_error = format!(
-                                "Upstream status on channel {} ({}): {} — {}",
-                                upstream.id, upstream.name, status, error_message
-                            );
+                            last_error = error_message.to_string();
                             continue;
                         }
 
@@ -3532,10 +3141,7 @@ async fn proxy_logic(
                     }
                 }
                 Err(e) => {
-                    last_error = format!(
-                        "Network error on channel {} ({}): {}",
-                        upstream.id, upstream.name, e
-                    );
+                    last_error = format!("Network Error: {e}");
                     let failure_type = if e.is_timeout() {
                         FailureType::Timeout
                     } else {
@@ -3578,46 +3184,39 @@ async fn proxy_logic(
             .and_then(|m| m.as_str())
             .map(|s| s.to_string());
 
-        let request_body_json: Option<serde_json::Value> = if let Ok(req) =
-            serde_json::from_slice::<OpenAIChatRequest>(&body_bytes)
-        {
-            let mut converted = adaptor
-                .convert_request(&req)
-                .or_else(|| Some(serde_json::json!(req))); // Use converted or original
+        let request_body_json: Option<serde_json::Value> =
+            if let Ok(req) = serde_json::from_slice::<OpenAIChatRequest>(&body_bytes) {
+                let mut converted = adaptor
+                    .convert_request(&req)
+                    .or_else(|| Some(serde_json::json!(req))); // Use converted or original
 
-            // Preserve stream flag and model in converted body for adaptor's build_request
-            #[allow(
-                clippy::collapsible_match,
-                reason = "separate `stream` and `model` branches document which request fields survive adaptor conversion"
-            )]
-            if let Some(ref mut body) = converted {
-                if let serde_json::Value::Object(ref mut map) = body {
-                    if original_stream {
-                        map.insert("stream".to_string(), serde_json::Value::Bool(true));
-                    }
-                    // Preserve model name for adaptors that need it (e.g., Gemini)
-                    if let Some(ref model) = original_model {
-                        map.insert(
-                            "model".to_string(),
-                            serde_json::Value::String(model.clone()),
-                        );
+                // Preserve stream flag and model in converted body for adaptor's build_request
+                #[allow(clippy::collapsible_match)]
+                if let Some(ref mut body) = converted {
+                    if let serde_json::Value::Object(ref mut map) = body {
+                        if original_stream {
+                            map.insert("stream".to_string(), serde_json::Value::Bool(true));
+                        }
+                        // Preserve model name for adaptors that need it (e.g., Gemini)
+                        if let Some(ref model) = original_model {
+                            map.insert(
+                                "model".to_string(),
+                                serde_json::Value::String(model.clone()),
+                            );
+                        }
                     }
                 }
-            }
-            converted
-        } else {
-            // Use the already parsed JSON
-            Some(body_json)
-        };
+                converted
+            } else {
+                // Use the already parsed JSON
+                Some(body_json)
+            };
 
         // SAFETY: The two branches above both return Some
         let mut request_body_json = match request_body_json {
             Some(json) => json,
             None => {
-                last_error = format!(
-                    "Request preparation error on channel {} ({}): failed to prepare request body",
-                    upstream.id, upstream.name
-                );
+                last_error = "Failed to prepare request body".to_string();
                 continue;
             }
         };
@@ -3643,96 +3242,21 @@ async fn proxy_logic(
         }
 
         // 4. Build Request via Adaptor
-        let req_builder = client.request(method.clone(), &target_url);
+        let req_builder = state.client.request(method.clone(), &target_url);
 
         // Apply header_override
-        let req_builder = if is_local {
-            // 本机不转发 BurnCloud 凭证，也不允许参数覆盖改写已声明的模型别名。
-            if let (Some(model), Some(object)) = (model_name, request_body_json.as_object_mut()) {
-                object.insert(
-                    "model".to_string(),
-                    serde_json::Value::String(model.to_string()),
-                );
-            }
-            req_builder.json(&request_body_json)
-        } else {
-            let req_builder =
-                apply_header_override(req_builder, upstream.header_override.as_deref());
-            adaptor
-                .build_request(client, req_builder, &upstream.api_key, &request_body_json)
-                .await
-        };
+        let req_builder = apply_header_override(req_builder, upstream.header_override.as_deref());
 
-        // 5. Execute: apply both the remaining total budget and legacy 10-hour
-        // per-attempt cap, including any streaming response body reads.
-        let req_builder =
-            req_builder.timeout(retry_attempt_timeout(retry_budget, request_start_time));
-        // 本机许可与响应体一起转移，handler 返回不会提前释放并发槽。
-        if is_local {
-            let Some(permit) = local.try_acquire(
-                channel_id_i32,
-                model_name.unwrap_or_default(),
-                &upstream.base_url,
-            ) else {
-                local_rejected = true;
-                last_error = format!("Local attachment {} rejected by admission", upstream.id);
-                continue;
-            };
-            sends += 1;
-            upstream_attempted = true;
-            let exchange = local_dispatch::LocalExchange::new(
-                state,
-                upstream,
-                model_name.unwrap_or_default(),
-                &session_id,
-                permit,
-                Arc::clone(&token_counter),
-            );
-            match exchange
-                .send(
-                    req_builder,
-                    is_stream,
-                    request_start_time.checked_add(retry_budget),
-                    local_probe_guard.take(),
-                )
-                .await
-            {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        if let Some(guard) = budget_guard.take() {
-                            let actual = token_counter.get_usage().total_tokens() as u64;
-                            guard.commit(if is_stream || actual == 0 {
-                                shaper_ctx.est_tpm
-                            } else {
-                                actual
-                            });
-                        }
-                    }
-                    return ProxyResult {
-                        response,
-                        upstream_id: last_upstream_id,
-                        final_status: status,
-                        pricing_region: selected_pricing_region.clone(),
-                        video_task_id: None,
-                        shaper_outcome: Some((
-                            iter_label.to_string(),
-                            shaper_ctx.color.as_char().to_string(),
-                        )),
-                        routing_decision: sched_routing_decision.clone(),
-                        sched_request_color: shaper_color,
-                        error_type: (!status.is_success()).then(|| "upstream_error".to_string()),
-                        request_log_data: None,
-                    };
-                }
-                Err(error) => {
-                    last_error = error;
-                    continue;
-                }
-            }
-        }
-        sends += 1;
-        upstream_attempted = true;
+        let req_builder = adaptor
+            .build_request(
+                &state.client,
+                req_builder,
+                &upstream.api_key,
+                &request_body_json,
+            )
+            .await;
+
+        // 5. Execute
         match req_builder.send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -3741,10 +3265,7 @@ async fn proxy_logic(
                 // Handle different response status codes
                 if status.is_server_error() {
                     // 5xx Server Error
-                    last_error = format!(
-                        "Upstream status on channel {} ({}): {}",
-                        upstream.id, upstream.name, status
-                    );
+                    last_error = format!("Upstream returned {status}");
                     record_upstream_failure(
                         state,
                         upstream,
@@ -3782,14 +3303,10 @@ async fn proxy_logic(
                             rate_limit_info.request_limit,
                         )
                         .inspect(|&learned| {
-                            if let Err(err) = state.budget_update_tx.try_send(state::BudgetUpdate {
+                            let _ = state.budget_update_tx.try_send(state::BudgetUpdate {
                                 channel_id,
                                 learned_limit: learned,
-                            }) {
-                                tracing::debug!(
-                                    "budget update dropped (channel full or closed): {err}"
-                                );
-                            }
+                            });
                         });
 
                     // Log rate limit info for debugging/monitoring
@@ -3815,10 +3332,7 @@ async fn proxy_logic(
                             let resp_bytes = match resp.bytes().await {
                                 Ok(b) => b,
                                 Err(e) => {
-                                    last_error = format!(
-                                        "Response read error on channel {} ({}): failed to read video generation response: {}",
-                                        upstream.id, upstream.name, e
-                                    );
+                                    last_error = format!("Failed to read video gen response: {e}");
                                     continue;
                                 }
                             };
@@ -3871,8 +3385,12 @@ async fn proxy_logic(
                                 request_log_data: None,
                             };
                         }
-                        // Keep the BudgetGuard live until the first chunk
-                        // passes inspection, so cancellation or peek errors refund TPM.
+                        // L2 Shaper success: OpenAI streaming path — keep est_tpm
+                        // (actual_tpm not yet available during stream, audit decision D9).
+                        if let Some(g) = budget_guard.take() {
+                            g.commit(shaper_ctx.est_tpm);
+                        }
+
                         // Peek first chunk to detect errors before sending HTTP response
                         // This allows retry on auth errors instead of sending error to user
                         let peek_timeout =
@@ -3916,7 +3434,7 @@ async fn proxy_logic(
                                         );
                                         state.channel_state_tracker.record_error(
                                             upstream.id.parse().unwrap_or(0),
-                                            model_name,
+                                            model_name.as_deref(),
                                             &failure_type,
                                             &format!("SSE error: {}", error_msg),
                                         );
@@ -3925,10 +3443,8 @@ async fn proxy_logic(
                                                 .affinity_cache
                                                 .evict(&session_id.to_string(), model);
                                         }
-                                        last_error = format!(
-                                            "Upstream SSE error on channel {} ({}), code {}: {}",
-                                            upstream.id, upstream.name, error_code, error_msg
-                                        );
+                                        last_error =
+                                            format!("SSE error {}: {}", error_code, error_msg);
                                         peek_error_handled = true;
                                         // Return empty stream since we will continue anyway
                                         futures::stream::empty::<
@@ -3948,10 +3464,7 @@ async fn proxy_logic(
                                         &upstream.id,
                                         FailureType::EmptyResponse,
                                     );
-                                    last_error = format!(
-                                        "Empty response on channel {} ({})",
-                                        upstream.id, upstream.name
-                                    );
+                                    last_error = "Empty response".to_string();
                                     peek_error_handled = true;
                                     futures::stream::empty().boxed()
                                 }
@@ -3961,10 +3474,7 @@ async fn proxy_logic(
                                         &upstream.id,
                                         FailureType::EmptyResponse,
                                     );
-                                    last_error = format!(
-                                        "Network error on channel {} ({}): {}",
-                                        upstream.id, upstream.name, e
-                                    );
+                                    last_error = format!("Network error: {}", e);
                                     peek_error_handled = true;
                                     futures::stream::empty().boxed()
                                 }
@@ -3975,16 +3485,9 @@ async fn proxy_logic(
                             }
                         };
 
-                        // If peek detected an error, skip this channel and try next.
-                        // The still-live guard refunds this attempted channel.
+                        // If peek detected an error, skip this channel and try next
                         if peek_error_handled {
                             continue;
-                        }
-
-                        // L2 Shaper success: OpenAI streaming path — retain est_tpm
-                        // only after the upstream stream passes first-chunk checks.
-                        if let Some(g) = budget_guard.take() {
-                            g.commit(shaper_ctx.est_tpm);
                         }
 
                         let counter_clone = Arc::clone(&token_counter);
@@ -4021,7 +3524,7 @@ async fn proxy_logic(
                                             seen_tokens_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         match parser.provider_name() {
-                                            "anthropic" => counter_clone.record_cumulative(&u),
+                                            "anthropic" => counter_clone.accumulate(&u),
                                             _ => counter_clone.set_from_usage(&u),
                                         }
                                     }
@@ -4114,10 +3617,7 @@ async fn proxy_logic(
                                         "Consecutive empty streaming responses exceeded threshold",
                                     );
 
-                                    if let Some(model) = model_name_clone
-                                        .as_ref()
-                                        .filter(|_| !session_id_clone.is_empty())
-                                    {
+                                    if let Some(model) = &model_name_clone {
                                         state_clone.affinity_cache.evict(&session_id_clone, model);
                                         tracing::debug!(
                                             session_id = %session_id_clone,
@@ -4138,10 +3638,7 @@ async fn proxy_logic(
                                 state_clone.empty_response_counter.reset(&upstream_id_str);
                                 // Now we can safely record success for the streaming response
                                 state_clone.circuit_breaker.record_success(&upstream_id_str);
-                                if let Some(model) = model_name_clone
-                                    .as_ref()
-                                    .filter(|_| !session_id_clone.is_empty())
-                                {
+                                if let Some(model) = &model_name_clone {
                                     state_clone.affinity_cache.insert(
                                         &session_id_clone,
                                         model,
@@ -4224,7 +3721,7 @@ async fn proxy_logic(
                                         );
                                         state.channel_state_tracker.record_error(
                                             upstream.id.parse().unwrap_or(0),
-                                            model_name,
+                                            model_name.as_deref(),
                                             &failure_type,
                                             &format!("SSE error: {}", error_msg),
                                         );
@@ -4233,10 +3730,8 @@ async fn proxy_logic(
                                                 .affinity_cache
                                                 .evict(&session_id.to_string(), model);
                                         }
-                                        last_error = format!(
-                                            "Upstream SSE error on channel {} ({}), code {}: {}",
-                                            upstream.id, upstream.name, error_code, error_msg
-                                        );
+                                        last_error =
+                                            format!("SSE error {}: {}", error_code, error_msg);
                                         peek_error_handled = true;
                                         futures::stream::empty::<
                                             Result<axum::body::Bytes, reqwest::Error>,
@@ -4254,10 +3749,7 @@ async fn proxy_logic(
                                         &upstream.id,
                                         FailureType::EmptyResponse,
                                     );
-                                    last_error = format!(
-                                        "Empty response on channel {} ({})",
-                                        upstream.id, upstream.name
-                                    );
+                                    last_error = "Empty response".to_string();
                                     peek_error_handled = true;
                                     futures::stream::empty().boxed()
                                 }
@@ -4267,10 +3759,7 @@ async fn proxy_logic(
                                         &upstream.id,
                                         FailureType::EmptyResponse,
                                     );
-                                    last_error = format!(
-                                        "Network error on channel {} ({}): {}",
-                                        upstream.id, upstream.name, e
-                                    );
+                                    last_error = format!("Network error: {}", e);
                                     peek_error_handled = true;
                                     futures::stream::empty().boxed()
                                 }
@@ -4325,7 +3814,7 @@ async fn proxy_logic(
                                             seen_tokens_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
                                         match parser.provider_name() {
-                                            "anthropic" => counter_clone.record_cumulative(&u),
+                                            "anthropic" => counter_clone.accumulate(&u),
                                             _ => counter_clone.set_from_usage(&u),
                                         }
                                     }
@@ -4430,10 +3919,7 @@ async fn proxy_logic(
                                 );
 
                                 // Evict affinity
-                                if let Some(model) = model_name_clone
-                                    .as_ref()
-                                    .filter(|_| !session_id_clone.is_empty())
-                                {
+                                if let Some(model) = &model_name_clone {
                                     state_clone.affinity_cache.evict(&session_id_clone, model);
                                 }
                             }
@@ -4464,10 +3950,7 @@ async fn proxy_logic(
                                     );
 
                                     // Evict affinity so next request tries different channel
-                                    if let Some(model) = model_name_clone
-                                        .as_ref()
-                                        .filter(|_| !session_id_clone.is_empty())
-                                    {
+                                    if let Some(model) = &model_name_clone {
                                         state_clone.affinity_cache.evict(&session_id_clone, model);
                                         tracing::debug!(
                                             session_id = %session_id_clone,
@@ -4488,10 +3971,7 @@ async fn proxy_logic(
                                 state_clone.empty_response_counter.reset(&upstream_id_str);
                                 // Now we can safely record success for the streaming response
                                 state_clone.circuit_breaker.record_success(&upstream_id_str);
-                                if let Some(model) = model_name_clone
-                                    .as_ref()
-                                    .filter(|_| !session_id_clone.is_empty())
-                                {
+                                if let Some(model) = &model_name_clone {
                                     state_clone.affinity_cache.insert(
                                         &session_id_clone,
                                         model,
@@ -4608,10 +4088,6 @@ async fn proxy_logic(
                             quality = ?quality,
                             "Response quality check failed for non-streaming main path"
                         );
-                        last_error = format!(
-                            "Response quality failure on channel {} ({}): {:?}",
-                            upstream.id, upstream.name, quality
-                        );
                         continue; // Try next candidate
                     }
 
@@ -4700,10 +4176,6 @@ async fn proxy_logic(
                             "Upstream {} rate limited, trying next candidate",
                             upstream.name
                         );
-                        last_error = format!(
-                            "Upstream status on channel {} ({}): {} — {}",
-                            upstream.id, upstream.name, status, error_message
-                        );
                         continue;
                     }
 
@@ -4783,10 +4255,7 @@ async fn proxy_logic(
                 }
             }
             Err(e) => {
-                last_error = format!(
-                    "Network error on channel {} ({}): {}",
-                    upstream.id, upstream.name, e
-                );
+                last_error = format!("Network Error: {e}");
                 let failure_type = if e.is_timeout() {
                     FailureType::Timeout
                 } else {
@@ -4810,76 +4279,11 @@ async fn proxy_logic(
         }
     }
 
-    if let Some(error) = selection_error
-        .filter(|_| !upstream_attempted && !local_client_failed && shaper_ctx.rejected_count == 0)
-    {
-        let body = serde_json::json!({"error": {"message": "No eligible candidate for scheduler policy", "type": "service_unavailable", "code": error.code(), "rejected_by": error.rejected_by()}});
-        let mut response = build_response_with_header(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "content-type",
-            "application/json",
-            Body::from(body.to_string()),
-        );
-        response.headers_mut().insert(
-            "X-Rejected-By",
-            HeaderValue::from_static(error.rejected_by()),
-        );
-        response
-            .headers_mut()
-            .insert("Retry-After", HeaderValue::from_static("60"));
-        return ProxyResult {
-            response,
-            upstream_id: None,
-            final_status: StatusCode::SERVICE_UNAVAILABLE,
-            pricing_region: None,
-            video_task_id: None,
-            shaper_outcome: None,
-            routing_decision: sched_routing_decision,
-            sched_request_color: shaper_color,
-            error_type: Some("router_reject".into()),
-            request_log_data: None,
-        };
-    }
-
-    // 只把尚未发送过的本机准入耗尽归因于 scheduler；纯 shaper 和真实上游失败保持原分支。
-    if local_rejected && !upstream_attempted && !local_client_failed {
-        let mut response = build_response_with_header(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "content-type",
-            "application/json",
-            Body::from(
-                r#"{"error":{"message":"No local attachment passed lifecycle admission","type":"service_unavailable","code":"no_available_channels","rejected_by":"scheduler"}}"#,
-            ),
-        );
-        response
-            .headers_mut()
-            .insert("X-Rejected-By", HeaderValue::from_static("scheduler"));
-        response
-            .headers_mut()
-            .insert("Retry-After", HeaderValue::from_static("60"));
-        return ProxyResult {
-            response,
-            upstream_id: None,
-            final_status: StatusCode::SERVICE_UNAVAILABLE,
-            pricing_region: None,
-            video_task_id: None,
-            shaper_outcome: None,
-            routing_decision: sched_routing_decision,
-            sched_request_color: shaper_color,
-            error_type: Some("router_reject".to_string()),
-            request_log_data,
-        };
-    }
-
     // After-loop branch: every candidate was rejected by the L2 Shaper
     // (no CB skip, no upstream failure). Return 503 + X-Rejected-By: shaper
     // per audit decision D12 — clients can distinguish a local shaper reject
     // from upstream 5xx and back off via Retry-After.
-    if shaper_ctx.rejected_count > 0
-        && !upstream_attempted
-        && (shaper_ctx.rejected_count as usize == total_candidates
-            || (strict_plan.is_some() && !local_rejected && !local_client_failed))
-    {
+    if shaper_ctx.rejected_count > 0 && shaper_ctx.rejected_count as usize == total_candidates {
         let body = Body::from(
             r#"{"error":{"message":"All candidate channels rejected by rate budget shaper","type":"service_unavailable","code":"rate_budget_exhausted","rejected_by":"shaper"}}"#,
         );
@@ -4946,234 +4350,12 @@ async fn proxy_logic(
     clippy::unnecessary_cast,
     clippy::let_and_return,
     clippy::redundant_pattern_matching,
-    clippy::identity_op,
-    reason = "test module: fail-fast assertions on router fixtures"
+    clippy::identity_op
 )]
 mod tests {
-    use super::{
-        enforce_retry_deadline, inject_video_tokens_if_empty, is_interactive_request,
-        parse_retry_budget_secs, remaining_attempt_timeout, retry_attempt_timeout,
-    };
-    use crate::rate_budget::{
-        BudgetBackend, BudgetGuard, ChannelReservation, ConsumeOutcome, InMemoryBudget,
-    };
+    use super::inject_video_tokens_if_empty;
     use axum::http::StatusCode;
-    use burncloud_commerce_billing::UnifiedUsage;
-    use burncloud_traffic_contracts::TrafficColor;
-
-    #[test]
-    fn retry_budget_classifies_interactive_and_long_task_endpoints() {
-        for path in [
-            "/v1/chat/completions",
-            "/v1/completions",
-            "/v1/responses",
-            "/v1/embeddings",
-            "/v1/messages",
-            "/v1/moderations",
-            "/v1/rerank",
-            "/v1beta/models/gemini-2.5-flash:generateContent",
-            "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
-        ] {
-            assert!(
-                is_interactive_request(path),
-                "{path} must have the interactive deadline"
-            );
-        }
-        for path in [
-            "/v1/video/generations",
-            "/v1/videos",
-            "/v1/audio/speech",
-            "/v1/audio/generations",
-            "/v1/music/generations",
-            "/unknown-long-running-endpoint",
-        ] {
-            assert!(
-                !is_interactive_request(path),
-                "{path} must retain long-task headroom"
-            );
-        }
-    }
-
-    #[test]
-    fn attempt_timeout_bounds_sse_and_preserves_long_task_cap() {
-        let started = std::time::Instant::now();
-        for path in ["/v1/responses", "/v1/chat/completions", "/v1/messages"] {
-            let budget = std::time::Duration::from_secs(super::retry_budget_secs(path));
-            let timeout = retry_attempt_timeout(budget, started);
-            assert!(timeout <= budget);
-            assert!(timeout <= std::time::Duration::from_secs(super::HTTP_REQUEST_TIMEOUT_SECS));
-        }
-        for path in [
-            "/v1/video/generations",
-            "/v1/audio/speech",
-            "/v1/music/generations",
-        ] {
-            let budget = std::time::Duration::from_secs(super::retry_budget_secs(path));
-            let timeout = retry_attempt_timeout(budget, started);
-            assert!(timeout <= std::time::Duration::from_secs(super::HTTP_REQUEST_TIMEOUT_SECS));
-            assert!(timeout > std::time::Duration::from_secs(120));
-        }
-    }
-
-    #[test]
-    fn retry_budget_config_rejects_zero_malformed_or_overflowing_values() {
-        let default = super::DEFAULT_INTERACTIVE_DEADLINE_SECS;
-        assert_eq!(parse_retry_budget_secs(None, default), default);
-        assert_eq!(parse_retry_budget_secs(Some(""), default), default);
-        assert_eq!(parse_retry_budget_secs(Some("0"), default), default);
-        assert_eq!(
-            parse_retry_budget_secs(Some("not-seconds"), default),
-            default
-        );
-        assert_eq!(
-            parse_retry_budget_secs(Some("18446744073709551615"), default),
-            default
-        );
-        assert_eq!(parse_retry_budget_secs(Some("45"), default), 45);
-        assert_eq!(
-            parse_retry_budget_secs(Some("2592000"), default),
-            super::MAX_RETRY_DEADLINE_SECS
-        );
-    }
-
-    #[tokio::test]
-    async fn retry_deadline_returns_structured_gateway_timeout() {
-        let response = super::retry_deadline_error_response();
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("timeout response body is readable");
-        let decoded: serde_json::Value =
-            serde_json::from_slice(&body).expect("timeout response is valid JSON");
-        assert_eq!(decoded["error"]["code"], "retry_deadline_exceeded");
-        assert_eq!(decoded["error"]["type"], "upstream_error");
-    }
-
-    #[test]
-    fn long_task_total_budget_is_not_reset_by_failover() {
-        let hour = std::time::Duration::from_secs(3600);
-        let long = std::time::Duration::from_secs(super::DEFAULT_LONG_TASK_DEADLINE_SECS);
-        assert_eq!(
-            remaining_attempt_timeout(long, std::time::Duration::ZERO),
-            hour * 10,
-            "first attempt retains the legacy ten-hour cap"
-        );
-        assert_eq!(
-            remaining_attempt_timeout(long, hour * 19),
-            hour,
-            "late failover must not extend the total budget"
-        );
-        assert_eq!(
-            remaining_attempt_timeout(long, long),
-            std::time::Duration::ZERO,
-            "an exhausted retry budget must never be reset"
-        );
-        assert_eq!(
-            remaining_attempt_timeout(long, long + hour),
-            std::time::Duration::ZERO,
-            "elapsed time beyond the deadline must saturate to zero"
-        );
-        assert_eq!(
-            remaining_attempt_timeout(std::time::Duration::from_secs(120), hour),
-            std::time::Duration::ZERO,
-            "interactive attempts must also respect the aggregate deadline"
-        );
-    }
-
-    #[tokio::test]
-    async fn interactive_sse_body_stops_when_request_deadline_expires() {
-        use futures::StreamExt;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // Local HTTP server sends response headers and one chunk, then stalls.
-        // The outer proxy_logic timer is no longer active after headers, so
-        // Reqwest's request-scoped timeout must end the pending body read.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a local upstream");
-        let addr = listener.local_addr().expect("local address");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = [0_u8; 4096];
-            let bytes_read = socket.read(&mut request).await.expect("read request");
-            assert!(bytes_read > 0, "upstream must receive an HTTP request");
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
-                )
-                .await
-                .expect("send first SSE body chunk");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        });
-
-        let started = std::time::Instant::now();
-        let timeout = retry_attempt_timeout(std::time::Duration::from_millis(800), started);
-        let response = reqwest::Client::new()
-            .get(format!("http://{addr}/v1/chat/completions"))
-            .timeout(timeout)
-            .send()
-            .await
-            .expect("receive upstream headers");
-        let mut body = response.bytes_stream();
-        let first = body
-            .next()
-            .await
-            .expect("initial chunk")
-            .expect("first chunk readable");
-        assert_eq!(first.as_ref(), b"hello");
-        let stalled = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
-            .await
-            .expect("stream must not hang beyond watchdog");
-        let error = stalled
-            .expect("the stalled body must produce an error")
-            .expect_err("response body must terminate on request timeout");
-        assert!(error.is_timeout(), "expected the real Reqwest timeout");
-        server.abort();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn deadline_cancellation_refunds_real_budget_guard() {
-        let budget = InMemoryBudget::new();
-        let channel_id = 680;
-        budget.configure(channel_id, 100, 1000, ChannelReservation::default());
-        let initial = budget.snapshot(channel_id).expect("configured channel");
-
-        // Drive the very same deadline helper that proxy_handler uses. The
-        // outer timeout prevents a removed/broken deadline from hanging CI.
-        let hung_upstream = async {
-            let outcome = budget.try_consume(channel_id, TrafficColor::Yellow, 100);
-            assert_eq!(outcome, ConsumeOutcome::OwnBucket);
-            let _guard = BudgetGuard::with_source(
-                &budget,
-                channel_id,
-                TrafficColor::Yellow,
-                100,
-                outcome.sourced().expect("admitted reservation source"),
-            );
-            assert_eq!(
-                budget
-                    .snapshot(channel_id)
-                    .expect("configured")
-                    .tpm_remaining_yellow,
-                initial.tpm_remaining_yellow - 100
-            );
-            std::future::pending::<()>().await;
-        };
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            enforce_retry_deadline(std::time::Duration::from_secs(1), hung_upstream),
-        )
-        .await;
-        assert!(
-            matches!(outcome, Ok(Err(_))),
-            "a stalled upstream must fail at its configured retry deadline"
-        );
-        let final_snapshot = budget.snapshot(channel_id).expect("configured");
-        assert_eq!(
-            final_snapshot.tpm_remaining_yellow, initial.tpm_remaining_yellow,
-            "deadline cancellation must drop the real BudgetGuard and refund TPM"
-        );
-    }
+    use burncloud_service_billing::UnifiedUsage;
 
     #[test]
     fn test_veo_billing_extracts_duration() {
@@ -5324,10 +4506,6 @@ pub mod smart_circuit_breaker;
 /// - Upstream errors
 ///
 /// Returns the response quality and whether the response should be treated as a failure.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "internal quality-check helper carrying the upstream response context; callers pass it positionally"
-)]
 fn check_response_quality(
     state: &AppState,
     upstream: &Upstream,
@@ -5337,6 +4515,11 @@ fn check_response_quality(
     status_code: axum::http::StatusCode,
     headers: &axum::http::HeaderMap,
 ) -> (crate::response_quality::ResponseQuality, bool) {
+    use crate::response_quality::RateLimitScope as UpstreamRateLimitScope;
+    use crate::response_quality::ResponseQuality;
+    use crate::response_quality::ResponseQualityDetector;
+    use crate::response_quality::UpstreamErrorType;
+
     let channel_id: i32 = upstream.id.parse().unwrap_or(0);
     let model = model_name.unwrap_or("unknown");
     let http_status: u16 = status_code.as_u16();
@@ -5349,27 +4532,13 @@ fn check_response_quality(
     );
 
     // Detect response quality using the detector
-    let detector = crate::response_quality::ResponseQualityDetector::new();
+    let detector = ResponseQualityDetector::new();
 
-    // Vertex conversion returns an OpenAI chat completion even though the
-    // upstream protocol is Vertex/Gemini. Validate the *returned* format,
-    // not the provider's native protocol, or a valid converted completion
-    // is incorrectly rejected as malformed (HTTP 502).
-    let normalized_vertex_completion = upstream.protocol == PROTOCOL_VERTEX
-        && serde_json::from_str::<serde_json::Value>(response_body)
-            .ok()
-            .is_some_and(|json| {
-                json.get("object").and_then(|v| v.as_str()) == Some("chat.completion")
-                    && json.get("choices").and_then(|v| v.as_array()).is_some()
-            });
-    let channel_type = if normalized_vertex_completion {
-        "openai"
-    } else {
-        match upstream.protocol.as_str() {
-            "claude" | "anthropic" => "anthropic",
-            "gemini" | "vertex" => "gemini",
-            _ => "openai",
-        }
+    // Determine channel_type based on upstream protocol
+    let channel_type = match upstream.protocol.as_str() {
+        "claude" | "anthropic" => "anthropic",
+        "gemini" | "vertex" => "gemini",
+        _ => "openai",
     };
 
     let quality = detector.detect(http_status, headers, response_body, 0, false, channel_type);
@@ -5389,46 +4558,16 @@ fn check_response_quality(
     let upstream_id_str = upstream.id.clone();
 
     match quality {
-        crate::response_quality::ResponseQuality::Healthy { .. } => {
+        ResponseQuality::Healthy { .. } => {
             // Reset empty response counter
             state.empty_response_counter.reset(&upstream_id_str);
             (quality, false)
         }
-        crate::response_quality::ResponseQuality::Partial { .. } => {
+        ResponseQuality::Partial { .. } => {
             // Partial response - not a failure but degraded
             state.empty_response_counter.reset(&upstream_id_str);
             (quality, false)
         }
-        _ => {
-            let failed = handle_unhealthy_response(
-                state,
-                upstream,
-                model_name,
-                session_id,
-                &upstream_id_str,
-                &quality,
-            );
-            (quality, failed)
-        }
-    }
-}
-
-/// Record the appropriate failure for a non-healthy response quality.
-///
-/// Returns `true` when the quality must be treated as a request failure.
-fn handle_unhealthy_response(
-    state: &AppState,
-    upstream: &Upstream,
-    model_name: Option<&str>,
-    session_id: &str,
-    upstream_id_str: &str,
-    quality: &crate::response_quality::ResponseQuality,
-) -> bool {
-    use crate::response_quality::RateLimitScope as UpstreamRateLimitScope;
-    use crate::response_quality::ResponseQuality;
-    use crate::response_quality::UpstreamErrorType;
-
-    match quality {
         ResponseQuality::Empty { .. } => {
             // Empty response - treat as failure
             tracing::warn!(
@@ -5437,7 +4576,7 @@ fn handle_unhealthy_response(
                 "Empty response detected (new quality system)"
             );
 
-            let should_penalize = state.empty_response_counter.record_empty(upstream_id_str);
+            let should_penalize = state.empty_response_counter.record_empty(&upstream_id_str);
             if should_penalize {
                 record_upstream_failure(
                     state,
@@ -5448,7 +4587,7 @@ fn handle_unhealthy_response(
                     session_id,
                 );
             }
-            true
+            (quality, true)
         }
         ResponseQuality::Malformed { .. } => {
             // Malformed response - treat as failure
@@ -5466,7 +4605,7 @@ fn handle_unhealthy_response(
                 "Malformed response",
                 session_id,
             );
-            true
+            (quality, true)
         }
         ResponseQuality::UpstreamError { ref error_type, .. } => {
             // Upstream error - treat as failure
@@ -5486,7 +4625,7 @@ fn handle_unhealthy_response(
                             crate::circuit_breaker::RateLimitScope::Unknown
                         }
                     },
-                    retry_after: *retry_after,
+                    retry_after: retry_after.clone(),
                 },
                 UpstreamErrorType::AuthFailed => FailureType::AuthFailed,
                 UpstreamErrorType::ModelNotFound => FailureType::ModelNotFound,
@@ -5506,9 +4645,7 @@ fn handle_unhealthy_response(
                 "Upstream error",
                 session_id,
             );
-            true
+            (quality, true)
         }
-        // Healthy/Partial are handled by the caller and never reach this helper.
-        _ => false,
     }
 }

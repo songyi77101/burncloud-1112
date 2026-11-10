@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "e2e browser tests: unwrap/expect are the intended failure signal and these pedantic lints add no value in ignored, manually-run UI tests"
+    clippy::redundant_pattern_matching
 )]
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -23,31 +22,22 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(0);
 struct RawResponse {
     success: Option<bool>,
     data: Option<serde_json::Value>,
-    #[allow(
-        dead_code,
-        reason = "deserialized from agent-browser JSON; only some flows read the error field"
-    )]
+    #[allow(dead_code)]
     error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BrowserResponse {
-    #[allow(
-        dead_code,
-        reason = "deserialized from agent-browser JSON; callers usually check the raw stdout instead"
-    )]
+pub struct BrowserResponse {
+    #[allow(dead_code)]
     pub success: bool,
     pub data: Option<serde_json::Value>,
     pub raw_stdout: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SnapshotResult {
+pub struct SnapshotResult {
     pub text: String,
-    #[allow(
-        dead_code,
-        reason = "parsed from the accessibility snapshot; only click_by_name consumes the refs map"
-    )]
+    #[allow(dead_code)]
     pub refs: serde_json::Value,
 }
 
@@ -56,7 +46,7 @@ pub(crate) struct SnapshotResult {
 /// Each instance uses a unique `--session` to isolate browser state between
 /// parallel tests. The daemon persists between commands within the same session,
 /// maintaining cookies/localStorage for login flows.
-pub(crate) struct AgentBrowser {
+pub struct AgentBrowser {
     base_url: String,
     screenshot_dir: String,
     session: String,
@@ -64,7 +54,7 @@ pub(crate) struct AgentBrowser {
 }
 
 impl AgentBrowser {
-    pub(crate) fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str) -> Self {
         // Use absolute path for screenshots since agent-browser runs in a
         // different working directory than the test process.
         let screenshot_dir = std::env::var("AESTHETIC_ARTIFACTS_DIR")
@@ -81,7 +71,7 @@ impl AgentBrowser {
             })
             .unwrap_or_else(|| "target/e2e-screenshots".to_string());
         // Ensure directory exists
-        std::fs::create_dir_all(&screenshot_dir).ok();
+        let _ = std::fs::create_dir_all(&screenshot_dir);
         let n = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let session = format!("burncloud-{}-{n}", std::process::id());
         Self {
@@ -171,24 +161,24 @@ impl AgentBrowser {
     }
 
     /// Navigate to a URL path (relative to base_url).
-    pub(crate) fn open(&mut self, path: &str) -> Result<BrowserResponse> {
+    pub fn open(&mut self, path: &str) -> Result<BrowserResponse> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.exec(&["open", &url])?;
-        self.exec(&["wait", "--load", "domcontentloaded"]).ok();
+        let _ = self.exec(&["wait", "--load", "domcontentloaded"]);
         // LiveView hydrates over WebSocket after the HTML shell loads.
         std::thread::sleep(Duration::from_millis(800));
         Ok(resp)
     }
 
     /// Click an element by selector.
-    pub(crate) fn click(&mut self, selector: &str) -> Result<BrowserResponse> {
+    pub fn click(&mut self, selector: &str) -> Result<BrowserResponse> {
         self.exec(&["click", selector])
     }
 
     /// Click an element by its accessible name (from the accessibility tree).
     /// Takes a snapshot, finds the ref with matching name, then clicks via ref.
     /// Supports matching by role: e.g. "button:登录", "link:Sign In".
-    pub(crate) fn click_by_name(&mut self, name: &str, timeout_ms: u64) -> Result<BrowserResponse> {
+    pub fn click_by_name(&mut self, name: &str, timeout_ms: u64) -> Result<BrowserResponse> {
         let start = Instant::now();
         loop {
             let snap = self.snapshot()?;
@@ -226,15 +216,15 @@ impl AgentBrowser {
     }
 
     /// Fill an input field by selector.
-    pub(crate) fn fill(&mut self, selector: &str, text: &str) -> Result<BrowserResponse> {
+    pub fn fill(&mut self, selector: &str, text: &str) -> Result<BrowserResponse> {
         self.exec(&["fill", selector, text])
     }
 
     /// Get the accessibility tree snapshot.
-    pub(crate) fn snapshot(&mut self) -> Result<SnapshotResult> {
+    pub fn snapshot(&mut self) -> Result<SnapshotResult> {
         let resp = self.exec(&["snapshot", "-i"])?;
         if Self::is_daemon_error(&resp.raw_stdout) {
-            self.exec(&["close"]).ok();
+            let _ = self.exec(&["close"]);
             std::thread::sleep(Duration::from_millis(300));
             let retry = self.exec(&["snapshot", "-i"])?;
             let parsed = Self::parse_snapshot_response(retry)?;
@@ -269,7 +259,7 @@ impl AgentBrowser {
 
     /// Wait for any of the given strings to appear in the accessibility tree.
     /// One snapshot per poll (OR semantics).
-    pub(crate) fn wait_for_any_text(
+    pub fn wait_for_any_text(
         &mut self,
         expected: &[&str],
         timeout_ms: u64,
@@ -303,23 +293,19 @@ impl AgentBrowser {
     ///
     /// Essential for Dioxus LiveView: the HTML page is a shell that renders
     /// content via WebSocket after page load.
-    pub(crate) fn wait_for_text(
-        &mut self,
-        expected: &str,
-        timeout_ms: u64,
-    ) -> Result<SnapshotResult> {
+    pub fn wait_for_text(&mut self, expected: &str, timeout_ms: u64) -> Result<SnapshotResult> {
         self.wait_for_any_text(&[expected], timeout_ms)
     }
 
     /// Take a screenshot and save to the screenshot directory.
-    pub(crate) fn screenshot(&self, name: &str) -> Result<()> {
+    pub fn screenshot(&self, name: &str) -> Result<()> {
         let path = format!("{}/{}.png", self.screenshot_dir, name);
         self.exec(&["screenshot", &path])?;
         Ok(())
     }
 
     /// Full-page screenshot (viewport + scrollable content).
-    pub(crate) fn screenshot_full(&self, name: &str) -> Result<()> {
+    pub fn screenshot_full(&self, name: &str) -> Result<()> {
         let path = format!("{}/{}.png", self.screenshot_dir, name);
         self.exec(&["screenshot", "--full", &path])?;
         Ok(())
@@ -327,7 +313,7 @@ impl AgentBrowser {
 
     /// Evaluate JavaScript in the browser context.
     /// Returns the `result` field from the eval response data.
-    pub(crate) fn eval(&mut self, js: &str) -> Result<serde_json::Value> {
+    pub fn eval(&mut self, js: &str) -> Result<serde_json::Value> {
         let resp = self.exec(&["eval", js])?;
         // agent-browser eval returns {"data": {"result": <value>}}
         if let Some(data) = resp.data {
@@ -342,24 +328,21 @@ impl AgentBrowser {
     }
 
     /// Close the browser session.
-    #[allow(
-        dead_code,
-        reason = "explicit teardown helper kept for callers; Drop already closes the session"
-    )]
-    pub(crate) fn close(&self) -> Result<()> {
-        self.exec(&["close"]).ok();
+    #[allow(dead_code)]
+    pub fn close(&self) -> Result<()> {
+        let _ = self.exec(&["close"]);
         Ok(())
     }
 }
 
 impl Drop for AgentBrowser {
     fn drop(&mut self) {
-        self.exec(&["close"]).ok();
+        let _ = self.exec(&["close"]);
     }
 }
 
 /// Check if agent-browser CLI is available.
-pub(crate) fn is_agent_browser_available() -> bool {
+pub fn is_agent_browser_available() -> bool {
     find_agent_browser_binary().is_some()
 }
 
@@ -416,16 +399,17 @@ fn find_agent_browser_binary() -> Option<String> {
         // Try common npm global paths
         if let Ok(appdata) = std::env::var("APPDATA") {
             let npm_path = format!("{}\\npm\\agent-browser.cmd", appdata);
-            if std::path::Path::new(&npm_path).exists()
-                && Command::new(&npm_path)
+            if std::path::Path::new(&npm_path).exists() {
+                if Command::new(&npm_path)
                     .arg("--version")
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()
                     .map(|s| s.success())
                     .unwrap_or(false)
-            {
-                return Some(npm_path);
+                {
+                    return Some(npm_path);
+                }
             }
         }
     }

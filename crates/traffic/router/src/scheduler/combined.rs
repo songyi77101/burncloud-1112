@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use burncloud_supply_contracts::Channel;
+use burncloud_common::types::Channel;
 
 use super::{
     CandidateFactors, ChannelScheduler, ScheduleError, SchedulerPolicyConfig, SchedulingContext,
@@ -20,12 +20,12 @@ use super::{
 /// Small epsilon to avoid division by zero.
 const EPS: f64 = 1e-6;
 
-pub(crate) struct CombinedScheduler {
+pub struct CombinedScheduler {
     config: SchedulerPolicyConfig,
 }
 
 impl CombinedScheduler {
-    pub(crate) fn new(config: SchedulerPolicyConfig) -> Self {
+    pub fn new(config: SchedulerPolicyConfig) -> Self {
         Self { config }
     }
 }
@@ -176,10 +176,7 @@ impl CombinedScheduler {
 }
 
 /// 0.5-offset min-max normalization with pre-computed bounds.
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-only helper: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
-)]
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 fn normalize_with_bounds(values: &[(i32, f64)], min_val: f64, max_val: f64) -> HashMap<i32, f64> {
     if values.is_empty() {
@@ -198,10 +195,7 @@ fn normalize_with_bounds(values: &[(i32, f64)], min_val: f64, max_val: f64) -> H
         .collect()
 }
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-only helper: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
-)]
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 /// 0.5-offset min-max normalization (computes bounds internally).
 fn normalize_05(values: &[(i32, f64)]) -> HashMap<i32, f64> {
@@ -216,10 +210,7 @@ fn normalize_05(values: &[(i32, f64)]) -> HashMap<i32, f64> {
     normalize_with_bounds(values, min_val, max_val)
 }
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "unit-test module: the fixtures cannot fail, so an unwrap failure is the intended failure signal"
-)]
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "e2e browser tests: unwrap/expect are the intended failure signal and these pedantic lints add no value in ignored, manually-run UI tests"
+    clippy::redundant_pattern_matching
 )]
 use super::*;
 
@@ -28,7 +27,7 @@ async fn test_channel_list_page_loads() {
     browser
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
-    browser.screenshot("channel-list-page").ok();
+    let _ = browser.screenshot("channel-list-page");
 }
 
 #[tokio::test]
@@ -50,7 +49,7 @@ async fn test_channel_list_empty_state() {
         snap.text.contains("创建") || snap.text.contains("添加") || snap.text.contains("渠道"),
         "Channel list should show empty state or list"
     );
-    browser.screenshot("channel-list-state").ok();
+    let _ = browser.screenshot("channel-list-state");
 }
 
 // 渠道创建流程
@@ -78,7 +77,7 @@ async fn test_channel_create_form_open() {
         .wait_for_text("名称", 10_000)
         .or_else(|_| browser.wait_for_text("类型", 5_000));
     assert!(result.is_ok(), "Create form should appear");
-    browser.screenshot("channel-create-form-open").ok();
+    let _ = browser.screenshot("channel-create-form-open");
 }
 
 #[tokio::test]
@@ -95,8 +94,8 @@ async fn test_channel_create_form_validation() {
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
 
-    browser.click_by_name("button:创建", 5_000).ok();
-    browser.wait_for_text("名称", 5_000).ok();
+    let _ = browser.click_by_name("button:创建", 5_000);
+    let _ = browser.wait_for_text("名称", 5_000);
 
     browser
         .click("button[type='submit']")
@@ -108,7 +107,7 @@ async fn test_channel_create_form_validation() {
         snap.text.contains("名称") || snap.text.contains("创建"),
         "Should show validation error or stay on form"
     );
-    browser.screenshot("channel-create-validation").ok();
+    let _ = browser.screenshot("channel-create-validation");
 }
 
 #[tokio::test]
@@ -125,8 +124,8 @@ async fn test_channel_create_success() {
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
 
-    browser.click_by_name("button:创建", 5_000).ok();
-    browser.wait_for_text("名称", 5_000).ok();
+    let _ = browser.click_by_name("button:创建", 5_000);
+    let _ = browser.wait_for_text("名称", 5_000);
 
     let channel_name = format!(
         "test_{}",
@@ -145,7 +144,7 @@ async fn test_channel_create_success() {
         .wait_for_text("成功", 10_000)
         .or_else(|_| browser.wait_for_text("模型网络", 5_000));
     assert!(result.is_ok(), "Channel creation should succeed");
-    browser.screenshot("channel-create-success").ok();
+    let _ = browser.screenshot("channel-create-success");
 }
 
 // 渠道编辑流程
@@ -164,8 +163,8 @@ async fn test_channel_edit_button_visible() {
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
 
-    let _snap = browser.snapshot().expect("Failed to snapshot");
-    browser.screenshot("channel-edit-button").ok();
+    let snap = browser.snapshot().expect("Failed to snapshot");
+    let _ = browser.screenshot("channel-edit-button");
 }
 
 // 渠道删除流程
@@ -184,8 +183,8 @@ async fn test_channel_delete_confirmation_dialog() {
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
 
-    browser.click_by_name("button:删除", 5_000).ok();
-    browser.screenshot("channel-delete-confirm").ok();
+    let _ = browser.click_by_name("button:删除", 5_000);
+    let _ = browser.screenshot("channel-delete-confirm");
 }
 
 #[tokio::test]
@@ -202,13 +201,13 @@ async fn test_channel_delete_cancel() {
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
 
-    browser.click_by_name("button:删除", 5_000).ok();
-    browser.wait_for_text("确认", 3_000).ok();
-    browser.click_by_name("button:取消", 3_000).ok();
+    let _ = browser.click_by_name("button:删除", 5_000);
+    let _ = browser.wait_for_text("确认", 3_000);
+    let _ = browser.click_by_name("button:取消", 3_000);
 
     let result = browser.wait_for_text("模型网络", 5_000);
     assert!(result.is_ok(), "Cancel should return to channel list");
-    browser.screenshot("channel-delete-cancel").ok();
+    let _ = browser.screenshot("channel-delete-cancel");
 }
 
 // 渠道状态切换
@@ -227,6 +226,6 @@ async fn test_channel_status_toggle() {
         .wait_for_text("模型网络", 10_000)
         .expect("Channel list page did not load");
 
-    browser.click_by_name("button:启用", 3_000).ok();
-    browser.screenshot("channel-status-toggle").ok();
+    let _ = browser.click_by_name("button:启用", 3_000);
+    let _ = browser.screenshot("channel-status-toggle");
 }

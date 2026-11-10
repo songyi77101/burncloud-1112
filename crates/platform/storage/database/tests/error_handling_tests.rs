@@ -1,9 +1,4 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::unnecessary_unwrap,
-    reason = "Test-only file: the assertions and unwraps are the test."
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unnecessary_unwrap)]
 use burncloud_database::{create_default_database, Database, DatabaseError, Result};
 use std::path::PathBuf;
 
@@ -50,7 +45,7 @@ async fn test_uninitialized_database_operations() {
                 connection_result.is_ok(),
                 "Initialized database should have connection"
             );
-            db.close().await.ok();
+            let _ = db.close().await;
         }
         Err(_) => {
             // If initialization failed, that's acceptable in test environments
@@ -74,21 +69,21 @@ async fn test_invalid_sql_operations() {
         assert!(non_existent_table_result.is_err());
 
         // Test invalid column reference
-        db.execute_query("CREATE TABLE test_invalid (id INTEGER)")
-            .await
-            .ok();
+        let _ = db
+            .execute_query("CREATE TABLE test_invalid (id INTEGER)")
+            .await;
         let invalid_column_result = db
             .execute_query("SELECT non_existent_column FROM test_invalid")
             .await;
         assert!(invalid_column_result.is_err());
 
         // Test constraint violation
-        db.execute_query("CREATE TABLE test_constraint (id INTEGER PRIMARY KEY)")
-            .await
-            .ok();
-        db.execute_query("INSERT INTO test_constraint (id) VALUES (1)")
-            .await
-            .ok();
+        let _ = db
+            .execute_query("CREATE TABLE test_constraint (id INTEGER PRIMARY KEY)")
+            .await;
+        let _ = db
+            .execute_query("INSERT INTO test_constraint (id) VALUES (1)")
+            .await;
         let constraint_violation_result = db
             .execute_query("INSERT INTO test_constraint (id) VALUES (1)")
             .await;
@@ -96,7 +91,7 @@ async fn test_invalid_sql_operations() {
 
         println!("✓ Invalid SQL operations correctly generate errors");
 
-        db.close().await.ok();
+        let _ = db.close().await;
     } else {
         println!("Database creation failed, skipping invalid SQL tests");
     }
@@ -149,7 +144,7 @@ async fn test_connection_pool_exhaustion() {
         // Should handle the load gracefully - either by queueing or returning errors
         assert!(success_count > 0, "At least some operations should succeed");
 
-        db.close().await.ok();
+        let _ = db.close().await;
     } else {
         println!("Database creation failed, skipping connection pool test");
     }
@@ -188,7 +183,7 @@ async fn test_malformed_database_paths() {
         match db_result {
             Ok(db) => {
                 println!("✓ Default database creation {} succeeded", i);
-                db.close().await.ok();
+                let _ = db.close().await;
             }
             Err(e) => {
                 println!("✓ Default database creation {} failed gracefully: {}", i, e);
@@ -265,7 +260,7 @@ async fn test_race_conditions_in_initialization() {
 
     // Clean up
     for db in databases {
-        db.close().await.ok();
+        let _ = db.close().await;
     }
 }
 
@@ -312,7 +307,7 @@ async fn test_resource_cleanup_on_errors() {
                 "Database should remain usable after failed operations"
             );
 
-            db.close().await.ok();
+            let _ = db.close().await;
         }
         Err(_) => {
             // If initialization failed, that's acceptable in test environments
@@ -333,15 +328,12 @@ async fn test_resource_cleanup_on_errors() {
             "Database should remain usable after failed operations"
         );
 
-        db.close().await.ok();
+        let _ = db.close().await;
     }
 }
 
 // Helper function for tests
-#[allow(
-    dead_code,
-    reason = "kept as a path-resolution reference for the tests above"
-)]
+#[allow(dead_code)]
 fn get_test_default_path() -> Result<PathBuf> {
     use burncloud_database::DatabaseError;
 

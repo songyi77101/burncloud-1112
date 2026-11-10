@@ -18,9 +18,9 @@ burncloud-common.workspace = true
 burncloud-database.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
 ssh2 = "0.9"
-hmac.workspace = true
+hmac = "0.12"
 sha1 = "0.10"
-base64.workspace = true
+base64 = "0.22"
 chrono = { workspace = true }
 
 [[test]]
@@ -35,17 +35,8 @@ path = "tests/e2e_smoke.rs"
 name = "logging_test"
 path = "tests/logging_test.rs"
 
-[[test]]
-name = "bundle_fresh_install"
-path = "tests/installer/bundle_fresh_install.rs"
-
 [dev-dependencies]
-burncloud-router.workspace = true
 burncloud-server.workspace = true
-burncloud-identity-user.workspace = true
-# Test-only: the API suite's demo-token fixture needs the default protocol configs, which
-# Supply owns (#842). Runtime supply wiring remains in `burncloud-server`.
-burncloud-supply-channel.workspace = true
 tracing.workspace = true
 log.workspace = true
 tempfile.workspace = true

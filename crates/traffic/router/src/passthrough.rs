@@ -1,8 +1,5 @@
 // Router passthrough — raw LLM API proxying — Value required; no feasible typed alternative.
-#![allow(
-    clippy::disallowed_types,
-    reason = "protocol/adaptor boundary must preserve arbitrary upstream JSON"
-)]
+#![allow(clippy::disallowed_types)]
 
 //! Gemini Passthrough Detection Module
 //!
@@ -23,7 +20,7 @@
 //! - Streaming responses are passed through directly
 //! - Token counting uses Gemini's `usageMetadata` field
 
-use burncloud_supply_contracts::ChannelType;
+use burncloud_common::types::ChannelType;
 use serde_json::Value;
 
 /// Detection result for passthrough mode

@@ -8,8 +8,7 @@
     clippy::let_and_return,
     clippy::to_string_trait_impl,
     clippy::to_string_in_format_args,
-    clippy::redundant_pattern_matching,
-    reason = "integration-test code: panicking on fixture failures is the intended signal, and fixtures use plain Value formatting and patterns"
+    clippy::redundant_pattern_matching
 )]
 //! Gemini Billing Test Suite
 //!
@@ -104,10 +103,7 @@ fn nano_to_dollars(nano: i64) -> f64 {
 
 /// Calculate expected cost in nanodollars
 /// Formula: (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
-#[allow(
-    dead_code,
-    reason = "reference implementation of the cost formula, kept for readers of this suite"
-)]
+#[allow(dead_code)]
 fn calculate_expected_cost(
     prompt_tokens: u64,
     completion_tokens: u64,

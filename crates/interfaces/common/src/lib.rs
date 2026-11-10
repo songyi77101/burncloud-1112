@@ -1,4 +1,5 @@
 pub mod constants;
+pub mod error;
 pub mod price_u64;
 pub mod pricing_config;
 pub mod repository;
@@ -7,9 +8,8 @@ pub mod types;
 pub use repository::CrudRepository;
 
 pub use constants::*;
-// Compatibility path only: the implementation is owned by Commerce
-// (`burncloud_commerce_contracts::price_u64`) and merely re-exported here.
-pub use burncloud_commerce_contracts::price_u64::{
+pub use error::*;
+pub use price_u64::{
     calculate_cost_safe, dollars_to_nano, nano_to_dollars, rate_to_scaled, scaled_to_rate,
     NANO_PER_DOLLAR, RATE_SCALE,
 };

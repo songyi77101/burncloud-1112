@@ -1,15 +1,15 @@
 use burncloud_node_runtime::{
-    ArtifactPreparer, ArtifactRequest, ArtifactSource, FakeArtifactPreparer, FakeRuntimePreparer,
-    RuntimePreparer, RuntimeRequest,
+    ArtifactPreparer, ArtifactRequest, FakeArtifactPreparer, FakeRuntimePreparer, RuntimePreparer,
+    RuntimeRequest,
 };
 
 #[tokio::test]
 async fn preparation_fakes_return_virtual_paths_only() {
     let artifact = FakeArtifactPreparer
-        .prepare(ArtifactRequest::new(
-            ArtifactSource::parse("qwen-4b.gguf").unwrap(),
-            None,
-        ))
+        .prepare(ArtifactRequest {
+            source: "qwen-4b.gguf".into(),
+            expected_digest: None,
+        })
         .await
         .unwrap();
     let runtime = FakeRuntimePreparer
@@ -20,10 +20,6 @@ async fn preparation_fakes_return_virtual_paths_only() {
         .await
         .unwrap();
 
-    assert!(artifact.local_path().is_absolute());
-    assert!(artifact
-        .local_path()
-        .to_string_lossy()
-        .contains("burncloud"));
+    assert!(artifact.local_path.starts_with("/fake/"));
     assert!(runtime.executable.starts_with("/fake/"));
 }

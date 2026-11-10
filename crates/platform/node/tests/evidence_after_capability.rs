@@ -1,7 +1,7 @@
 use burncloud_node_runtime::{
-    ArtifactPreparer, ArtifactRequest, ArtifactSource, DemandReconciler, FakeArtifactPreparer,
-    FakeReadinessProbe, FakeRuntimePreparer, NodeState, ReadinessProbe, ReadinessTarget,
-    ReconcileAction, ReconcileEvidence, RuntimePreparer, RuntimeRequest,
+    ArtifactPreparer, ArtifactRequest, DemandReconciler, FakeArtifactPreparer, FakeReadinessProbe,
+    FakeRuntimePreparer, NodeState, ReadinessProbe, ReadinessTarget, ReconcileAction,
+    ReconcileEvidence, RuntimePreparer, RuntimeRequest,
 };
 
 /// Evidence is a receipt for a completed capability call, not permission to
@@ -16,13 +16,13 @@ async fn evidence_follows_successful_capability_calls() {
     r.observe(ReconcileEvidence::Resolved).unwrap();
 
     let artifact = FakeArtifactPreparer
-        .prepare(ArtifactRequest::new(
-            ArtifactSource::parse("qwen-4b.gguf").unwrap(),
-            None,
-        ))
+        .prepare(ArtifactRequest {
+            source: "qwen-4b.gguf".into(),
+            expected_digest: None,
+        })
         .await
         .unwrap();
-    assert!(artifact.is_verified());
+    assert!(artifact.verified);
     r.observe(ReconcileEvidence::ArtifactPrepared).unwrap();
 
     assert_eq!(r.next_action().unwrap(), ReconcileAction::PrepareRuntime);

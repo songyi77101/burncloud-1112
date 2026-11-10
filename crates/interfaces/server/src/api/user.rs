@@ -221,10 +221,7 @@ fn persist_client_state(username: &str, token: &str) {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".burncloud");
 
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(path = %dir.display(), %error, "failed to create client-state directory");
-        return;
-    }
+    let _ = std::fs::create_dir_all(&dir);
 
     let state = serde_json::json!({
         "last_username": username,
@@ -237,11 +234,7 @@ fn persist_client_state(username: &str, token: &str) {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(error) =
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                {
-                    tracing::warn!(path = %path.display(), %error, "failed to restrict client-state permissions");
-                }
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
         }
     }

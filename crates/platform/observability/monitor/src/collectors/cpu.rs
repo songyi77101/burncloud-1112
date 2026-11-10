@@ -52,10 +52,8 @@ impl CpuCollector {
     async fn collect_windows(&mut self) -> Result<CpuInfo, MonitorError> {
         use winapi::um::sysinfoapi::{GetSystemInfo, SYSTEM_INFO};
 
-        // SAFETY: `SYSTEM_INFO` is a plain-old-data Windows FFI struct made only of integers, so an
-        // all-zero bit pattern is a valid value; `GetSystemInfo` fills every field before it is read.
+        // 获取CPU核心数
         let mut sys_info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
-        // SAFETY: `sys_info` points to valid writable storage for SYSTEM_INFO for the duration of the call.
         unsafe {
             GetSystemInfo(&mut sys_info);
         }
@@ -83,15 +81,11 @@ impl CpuCollector {
         use std::ptr;
         use winapi::shared::minwindef::{DWORD, HKEY};
         use winapi::shared::winerror::ERROR_SUCCESS;
-        use winapi::um::winreg::{
-            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE,
-        };
+        use winapi::um::winreg::*;
 
         let mut frequency = 0u64;
         let mut brand = String::from("Windows CPU");
 
-        // SAFETY: every pointer passed to the Win32 registry APIs below is backed by live local storage;
-        // opened handles are closed before leaving the block, and buffer sizes match the provided buffers.
         unsafe {
             let mut hkey: HKEY = ptr::null_mut();
             let subkey: Vec<u16> = OsStr::new("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0")
@@ -100,7 +94,7 @@ impl CpuCollector {
                 .collect();
 
             if RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
+                winapi::um::winreg::HKEY_LOCAL_MACHINE,
                 subkey.as_ptr(),
                 0,
                 winapi::um::winnt::KEY_READ,
