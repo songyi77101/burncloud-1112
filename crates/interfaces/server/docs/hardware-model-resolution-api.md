@@ -14,7 +14,7 @@
 
 ```json
 {
-  "model": "Qwen/Qwen3-8B-GGUF",
+  "model": "Qwen/Qwen3-8B",
   "source": "modelscope",
   "revision": "master"
 }
@@ -118,15 +118,13 @@ async function fetchHardware(): Promise<HardwareSnapshot> {
 
 返回外部模型仓库预置项。当前返回的 `model/source/revision` 是后续解析请求需要提交的完整资源身份。
 
-当前内置预置目录包含 17 个模型，展示名称沿用产品目录；仓库身份绑定到可发现 GGUF 文件的 ModelScope `master` 仓库。DeepSeek V4.1 Flash 使用 `unsloth/DeepSeek-V4.1-Flash-1017-GGUF`，GLM-5.3 使用 `Scantist/GLM-5.3-SLIM-GGUF`，其余预置同样绑定对应的 GGUF 仓库。DeepSeek V4 Pro 已从预置目录移除。
-
 ```json
 [
   {
     "id": "qwen3-8b",
     "name": "Qwen3-8B",
     "preset": true,
-    "model": "Qwen/Qwen3-8B-GGUF",
+    "model": "Qwen/Qwen3-8B",
     "source": "modelscope",
     "revision": "master"
   }
@@ -165,7 +163,7 @@ async function fetchHardware(): Promise<HardwareSnapshot> {
       "id": "qwen3-8b",
       "name": "Qwen3-8B",
       "preset": false,
-      "model": "Qwen/Qwen3-8B-GGUF",
+      "model": "Qwen/Qwen3-8B",
       "source": "modelscope",
       "revision": "master"
     }
@@ -184,7 +182,7 @@ async function fetchHardware(): Promise<HardwareSnapshot> {
       "id": "qwen3-8b",
       "name": "Qwen3-8B",
       "preset": false,
-      "model": "Qwen/Qwen3-8B-GGUF",
+      "model": "Qwen/Qwen3-8B",
       "source": "modelscope",
       "revision": "master"
     }
@@ -213,7 +211,7 @@ GET /api/models/status?preset=qwen3-8b
 ### 6.2 外部模型查询
 
 ```text
-GET /api/models/status?model=Qwen%2FQwen3-8B-GGUF&source=modelscope&revision=master
+GET /api/models/status?model=Qwen%2FQwen3-8B&source=modelscope&revision=master
 ```
 
 ### 6.3 成功响应
@@ -221,10 +219,10 @@ GET /api/models/status?model=Qwen%2FQwen3-8B-GGUF&source=modelscope&revision=mas
 ```json
 {
   "status": "downloadable",
-  "model": "Qwen/Qwen3-8B-GGUF",
+  "model": "Qwen/Qwen3-8B",
   "source": "modelscope",
   "revision": "master",
-  "resource_url": "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/files?Revision=master"
+  "resource_url": "https://modelscope.cn/models/Qwen/Qwen3-8B/files?Revision=master"
 }
 ```
 
@@ -258,7 +256,7 @@ Content-Type: application/json
 
 ```json
 {
-  "model": "Qwen/Qwen3-8B-GGUF",
+  "model": "Qwen/Qwen3-8B",
   "source": "modelscope",
   "revision": "master"
 }
@@ -307,7 +305,7 @@ https://{host}/api/models/{owner}/{name}/tree/{revision}?recursive=true
   "success": true,
   "data": {
     "status": "resolved",
-    "model": "Qwen/Qwen3-8B-GGUF",
+    "model": "Qwen/Qwen3-8B",
     "hardware": {
       "platform": "windows",
       "arch": "x86_64",
@@ -324,14 +322,14 @@ https://{host}/api/models/{owner}/{name}/tree/{revision}?recursive=true
     },
     "candidates": [
       {
-        "model_name": "Qwen/Qwen3-8B-GGUF",
+        "model_name": "Qwen/Qwen3-8B",
         "variant_id": "Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf",
         "quantization": "Q4_K_M",
         "min_ram_bytes": 4294967296,
         "min_vram_bytes": 0,
         "disk_size_bytes": 1929903008,
         "runtime": "llama.cpp",
-        "artifact_uri": "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf",
+        "artifact_uri": "https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf",
         "checksum": "sha256:..."
       }
     ]
@@ -348,7 +346,7 @@ https://{host}/api/models/{owner}/{name}/tree/{revision}?recursive=true
   "success": true,
   "data": {
     "status": "unsupported",
-    "model": "Qwen/Qwen3-8B-GGUF",
+    "model": "Qwen/Qwen3-8B",
     "hardware": {
       "platform": "windows",
       "arch": "x86_64",
@@ -518,7 +516,7 @@ llama3.2:1b
 新流程使用用户选择的外部仓库身份：
 
 ```text
-Qwen/Qwen3-8B-GGUF + modelscope + master
+Qwen/Qwen3-8B + modelscope + master
 ```
 
 两套标识不再映射。前端不能把旧的 Ollama 风格名称或显示名称传给新接口，必须提交目录记录中的 `model/source/revision`。
