@@ -1,9 +1,13 @@
 //! 默认本地替身；目录、设备、路径、摘要、回复与延迟仅在这里生成。
 
-use super::model::{
-    valid_digest, ChatError, ChatModel, ErrorKind, GenerationEvent, GenerationRequest, Gpu,
-    Hardware, HardwareEvent, InferenceMetrics, InitializationRequest, MessageRole, ModelVariant,
-    Operation, Platform, PreparationEvent, PreparationStage, PreparedModel, GIB,
+use super::{
+    catalog::{CatalogClient, CatalogSelection},
+    model::{
+        valid_digest, ChatError, ChatModel, ErrorKind, GenerationEvent, GenerationRequest, Gpu,
+        Hardware, HardwareEvent, InferenceMetrics, InitializationRequest, MessageRole,
+        ModelResolution, ModelVariant, Operation, Platform, PreparationEvent, PreparationStage,
+        PreparedModel, GIB,
+    },
 };
 use std::{future::Future, pin::Pin};
 
@@ -29,6 +33,30 @@ pub(super) trait ChatBackend {
     fn model_status(&self, model_id: String) -> BackendFuture<Vec<PreparedModel>>;
     /// 回调报告已完成项，最终资源快照与回调一致；未知量保留为 None。
     fn detect_hardware(&self, callback: Callback<HardwareEvent>) -> BackendFuture<Hardware>;
+    /// 在同一次后端调用中检测硬件并解析兼容 Variant；旧替身默认只提供硬件快照。
+    fn resolve_model(
+        &self,
+        _model: String,
+        callback: Callback<HardwareEvent>,
+    ) -> BackendFuture<ModelResolution> {
+        let future = self.detect_hardware(callback);
+        Box::pin(async move {
+            let hardware = future.await?;
+            Ok(ModelResolution {
+                hardware,
+                variants: Vec::new(),
+                reason: None,
+            })
+        })
+    }
+    /// 解析前端确认的外部仓库模型；默认替身仅回传硬件快照。
+    fn resolve_catalog_model(
+        &self,
+        _selection: CatalogSelection,
+        callback: Callback<HardwareEvent>,
+    ) -> BackendFuture<ModelResolution> {
+        self.resolve_model(String::new(), callback)
+    }
     /// 仅接受用户已确认版本；依次回调下载、校验、加载、部署、健康和上报。
     fn initialize(
         &self,
@@ -113,6 +141,7 @@ fn hardware(platform: Platform) -> Hardware {
         Platform::Windows => ("x64 CPU · 8 核", "独立 GPU"),
         Platform::MacOs => ("Apple CPU · 8 核", "Apple GPU"),
         Platform::Linux => ("x64 CPU · 8 核", "Linux GPU"),
+        Platform::Other => ("Unknown CPU", "Unknown GPU"),
     };
     Hardware {
         platform: Some(platform),
@@ -131,6 +160,7 @@ fn example_path(platform: Platform, model: &str, variant: &str) -> String {
         Platform::Windows => format!(r"C:\BurnCloud\models\{name}-{variant}.gguf"),
         Platform::MacOs => format!("/Users/user/BurnCloud/models/{name}-{variant}.gguf"),
         Platform::Linux => format!("/home/user/BurnCloud/models/{name}-{variant}.gguf"),
+        Platform::Other => format!("/tmp/BurnCloud/models/{name}-{variant}.gguf"),
     }
 }
 fn error(kind: ErrorKind, operation: Operation, reason: &str) -> ChatError {
@@ -142,6 +172,94 @@ fn error(kind: ErrorKind, operation: Operation, reason: &str) -> ChatError {
 }
 async fn pause() {
     tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+}
+
+/// 生产页面使用主服务硬件接口，其他未接入能力继续复用本地占位实现。
+pub(super) struct HttpBackend {
+    local: LocalBackend,
+    hardware_client: Result<CatalogClient, ChatError>,
+}
+
+impl Default for HttpBackend {
+    fn default() -> Self {
+        let hardware_client = CatalogClient::from_env().map_err(|error| ChatError {
+            kind: error.kind,
+            operation: Operation::Hardware,
+            reason: error.reason,
+        });
+        Self {
+            local: LocalBackend,
+            hardware_client,
+        }
+    }
+}
+
+impl ChatBackend for HttpBackend {
+    fn search(&self, keyword: String) -> BackendFuture<Vec<ChatModel>> {
+        self.local.search(keyword)
+    }
+
+    fn model_status(&self, model_id: String) -> BackendFuture<Vec<PreparedModel>> {
+        self.local.model_status(model_id)
+    }
+
+    fn detect_hardware(&self, mut callback: Callback<HardwareEvent>) -> BackendFuture<Hardware> {
+        let hardware_client = self.hardware_client.clone();
+        Box::pin(async move {
+            let hardware = hardware_client?.inspect_hardware().await?;
+            emit_hardware_events(&mut callback, &hardware);
+            Ok(hardware)
+        })
+    }
+
+    fn resolve_model(
+        &self,
+        model: String,
+        callback: Callback<HardwareEvent>,
+    ) -> BackendFuture<ModelResolution> {
+        // 只有外部目录选择才调用服务端模型解析；旧的本地替身模型继续复用本地硬件流程。
+        self.local.resolve_model(model, callback)
+    }
+
+    fn resolve_catalog_model(
+        &self,
+        selection: CatalogSelection,
+        mut callback: Callback<HardwareEvent>,
+    ) -> BackendFuture<ModelResolution> {
+        let hardware_client = self.hardware_client.clone();
+        Box::pin(async move {
+            let result = hardware_client?.resolve_model(&selection).await?;
+            emit_hardware_events(&mut callback, &result.hardware);
+            Ok(result)
+        })
+    }
+
+    fn initialize(
+        &self,
+        request: InitializationRequest,
+        callback: Callback<PreparationEvent>,
+    ) -> BackendFuture<PreparedModel> {
+        self.local.initialize(request, callback)
+    }
+
+    fn generate(
+        &self,
+        request: GenerationRequest,
+        callback: Callback<GenerationEvent>,
+    ) -> BackendFuture<Option<InferenceMetrics>> {
+        self.local.generate(request, callback)
+    }
+}
+
+fn emit_hardware_events(callback: &mut Callback<HardwareEvent>, hardware: &Hardware) {
+    for event in [
+        HardwareEvent::Cpu(hardware.cpu.clone().unwrap_or_default()),
+        HardwareEvent::Gpus(hardware.gpus.clone().unwrap_or_default()),
+        HardwareEvent::Memory(hardware.ram_bytes),
+        HardwareEvent::Disk(hardware.disk_bytes),
+    ] {
+        callback(event);
+    }
 }
 
 impl ChatBackend for LocalBackend {
@@ -319,9 +437,15 @@ impl ChatBackend for LocalBackend {
 
 pub(super) const SIMULATED_REPLY_SEGMENTS: [&str; 4] = [
     "你可以在输入框旁搜索并选择模型。",
-    "\n\n模型初始化包含硬件检测、量化版本选择、下载、校验和部署。",
-    "\n\n初始化完成后可继续对话；如果中途失败，原消息会保留在输入框中。",
-    "\n\n本次客户端会话内会保留模型就绪状态，重新启动后会重置。",
+    "
+
+模型初始化包含硬件检测、量化版本选择、下载、校验和部署。",
+    "
+
+初始化完成后可继续对话；如果中途失败，原消息会保留在输入框中。",
+    "
+
+本次客户端会话内会保留模型就绪状态，重新启动后会重置。",
 ];
 
 #[cfg(test)]

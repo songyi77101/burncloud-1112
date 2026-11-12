@@ -522,7 +522,10 @@ async fn catalog_handoff_detects_once_and_stops_without_artifact_or_deployment()
     ui.label("下载");
     ui.wait_for(|probe| probe.text.contains("尚未接入该仓库版本的工件解析与部署"))
         .await;
-    assert!(ui.probe.static_text.contains("当前入口未提供可下载工件"));
+    assert!(ui
+        .probe
+        .static_text
+        .contains("硬件检测与量化版本解析来自 Node 主服务"));
     assert!(!ui.probe.static_text.contains("工件下载并校验后停止"));
     assert_eq!(*backend.calls.borrow(), vec!["hardware"]);
     let input = ui.probe.find("aria-label", "输入消息或指令", "input");
@@ -531,8 +534,15 @@ async fn catalog_handoff_detects_once_and_stops_without_artifact_or_deployment()
     assert_eq!(*backend.calls.borrow(), vec!["hardware"]);
     let calls = service.requests.lock().expect("请求记录");
     assert_eq!(calls.len(), 2);
-    assert!(calls[0].contains("/api/models/presets"));
-    assert!(calls[1].contains("/api/models/status?preset=test-1"));
+    assert!(!calls
+        .iter()
+        .any(|call| call.contains("/api/node/models/manifests")));
+    assert!(calls
+        .iter()
+        .any(|call| call.contains("/api/models/presets")));
+    assert!(calls
+        .iter()
+        .any(|call| call.contains("/api/models/status?preset=test-1")));
 }
 #[tokio::test]
 async fn catalog_status_failure_keeps_chat_model_and_allows_retry() {

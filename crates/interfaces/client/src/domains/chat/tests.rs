@@ -1,9 +1,10 @@
 use super::{
     backend::{ChatBackend, LocalBackend, LOCAL_DIGEST as DEMO_DIGEST, SIMULATED_REPLY_SEGMENTS},
+    catalog::{CatalogSelection, CatalogVersion, VersionStatus},
     model::{
         ChatError, ChatModel, ErrorKind, GenerationEvent, Gpu, Hardware as DemoHardware,
-        HardwareEvent, MessageRole, Operation, Platform as DemoPlatform, PreparationEvent,
-        PreparationStage, PreparedModel, GIB,
+        HardwareEvent, MessageRole, ModelResolution, ModelVariant, Operation,
+        Platform as DemoPlatform, PreparationEvent, PreparationStage, PreparedModel, GIB,
     },
     state::{ChatAction, ChatState, GenerationPlan, ReasoningEffort},
 };
@@ -40,6 +41,7 @@ fn hardware(platform: DemoPlatform) -> DemoHardware {
         DemoPlatform::Windows => ("x64 CPU · 8 核", "独立 GPU"),
         DemoPlatform::MacOs => ("Apple CPU · 8 核", "Apple GPU"),
         DemoPlatform::Linux => ("x64 CPU · 8 核", "Linux GPU"),
+        DemoPlatform::Other => ("Unknown CPU", "Unknown GPU"),
     };
     DemoHardware {
         platform: Some(platform),
@@ -82,6 +84,7 @@ fn path(platform: DemoPlatform, model: &str, variant: &str) -> String {
         DemoPlatform::Windows => format!(r"C:\BurnCloud\models\{name}-{variant}.gguf"),
         DemoPlatform::MacOs => format!("/Users/user/BurnCloud/models/{name}-{variant}.gguf"),
         DemoPlatform::Linux => format!("/home/user/BurnCloud/models/{name}-{variant}.gguf"),
+        DemoPlatform::Other => format!("/tmp/BurnCloud/models/{name}-{variant}.gguf"),
     }
 }
 fn tick(state: &mut ChatState, id: u64) -> Option<GenerationPlan> {
@@ -186,6 +189,64 @@ fn complete(state: &mut ChatState, id: u64) -> Option<GenerationPlan> {
         PreparationStage::Ready
     );
     generation
+}
+
+#[test]
+fn selected_catalog_model_resolution_populates_variants_and_hardware() {
+    let mut state = ChatState::default();
+    let run_id = state
+        .accept_catalog(
+            CatalogSelection {
+                name: "Qwen3-8B".into(),
+                preset: Some("qwen3-8b".into()),
+                version: CatalogVersion {
+                    name: "Qwen3-8B".into(),
+                    model: "Qwen/Qwen3-8B".into(),
+                    source: "modelscope".into(),
+                    revision: "master".into(),
+                    resource_url:
+                        "https://modelscope.cn/models/Qwen/Qwen3-8B/files?Revision=master".into(),
+                },
+            },
+            VersionStatus::Downloadable,
+            Vec::new(),
+        )
+        .expect("目录模型应启动准备流程");
+    let hardware = hardware(DemoPlatform::Windows);
+    for event in [
+        HardwareEvent::Cpu(hardware.cpu.clone().expect("CPU")),
+        HardwareEvent::Gpus(hardware.gpus.clone().expect("GPU")),
+        HardwareEvent::Memory(hardware.ram_bytes),
+        HardwareEvent::Disk(hardware.disk_bytes),
+    ] {
+        state.hardware_event(run_id, event);
+    }
+    state.finish_model_resolution(
+        run_id,
+        Ok(ModelResolution {
+            hardware,
+            variants: vec![ModelVariant {
+                id: "Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf".into(),
+                quantization: "Q4_K_M".into(),
+                runtime: "llama.cpp".into(),
+                artifact_source: "https://example.invalid/qwen.gguf".into(),
+                expected_sha256:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+                ram_bytes: 4 * GIB,
+                vram_bytes: 3 * GIB,
+                disk_bytes: 2 * GIB,
+            }],
+            reason: None,
+        }),
+    );
+    let preparation = state.preparation().expect("流程卡片");
+    assert_eq!(preparation.stage, PreparationStage::SelectingVariant);
+    assert_eq!(
+        preparation.model.variants[0].id,
+        "Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf"
+    );
+    assert_eq!(preparation.hardware.max_vram(), Some(8 * GIB));
 }
 
 #[test]
@@ -368,6 +429,31 @@ fn resources_match_at_the_boundary_and_report_each_shortfall() {
     let id = start(&mut state);
     detected(&mut state, id, hardware);
     assert!(state.choose_variant(id, "q8"));
+}
+
+#[test]
+fn undeclared_vram_does_not_block_external_variant_without_a_detectable_gpu() {
+    let variant = ModelVariant {
+        id: "external-q4".into(),
+        quantization: "Q4_K_M".into(),
+        runtime: "llama.cpp".into(),
+        artifact_source: "https://example.invalid/model.gguf".into(),
+        expected_sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .into(),
+        ram_bytes: 4 * GIB,
+        vram_bytes: 0,
+        disk_bytes: 2 * GIB,
+    };
+    let hardware = DemoHardware {
+        platform: Some(DemoPlatform::Windows),
+        cpu: Some("测试 CPU".into()),
+        gpus: Some(Vec::new()),
+        ram_bytes: Some(8 * GIB),
+        disk_bytes: Some(4 * GIB),
+    };
+
+    assert!(variant.fits(&hardware));
+    assert!(!variant.shortfall(&hardware).contains("显存"));
 }
 
 #[test]
