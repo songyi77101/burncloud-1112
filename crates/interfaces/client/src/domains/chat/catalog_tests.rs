@@ -450,6 +450,25 @@ fn identity_and_resource_validation_preserve_source_and_revision() {
     assert!(bad.validate().is_err());
 }
 
+#[test]
+fn preset_accepts_stable_id_for_gguf_repository_but_search_result_does_not() {
+    let preset = CatalogModel {
+        id: "qwen3-8b".into(),
+        name: "Qwen3-8B".into(),
+        preset: true,
+        model: "Qwen/Qwen3-8B-GGUF".into(),
+        source: "modelscope".into(),
+        revision: "master".into(),
+    };
+    assert!(preset.validate().is_ok());
+
+    let search_result = CatalogModel {
+        preset: false,
+        ..preset
+    };
+    assert!(search_result.validate().is_err());
+}
+
 #[tokio::test]
 async fn ndjson_handles_split_unicode_and_final_line_without_newline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("分块服务");
