@@ -736,13 +736,14 @@ impl CatalogModel {
     /// # Notes
     /// 不把缺失字段补成虚构仓库。
     pub(super) fn validate(&self) -> Result<(), ChatError> {
+        let id_matches_model = self
+            .model
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase() == self.id);
         if self.name.trim().is_empty()
             || !valid_resource(&self.model, &self.source, &self.revision)
-            || self
-                .model
-                .rsplit('/')
-                .next()
-                .is_none_or(|name| name.to_ascii_lowercase() != self.id)
+            || (!self.preset && !id_matches_model)
         {
             return Err(invalid_search("模型目录条目无效或资源不完整"));
         }
