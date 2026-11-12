@@ -1,13 +1,13 @@
 use burncloud_node_runtime::{
-    ArtifactPreparer, ArtifactRequest, ArtifactSource, DemandReconciler, Digest, HardwareProbe,
-    HealthProbe, NodeComposition, NodeState, PreparedArtifact, PreparedRuntime, ProcessHandle,
-    ProcessManager, ProcessPlan, ReadinessProbe, ReconcileAction, ReconcileEvidence,
-    RuntimeAdapter, RuntimePreparer, RuntimeRequest,
+    ArtifactPreparation, DemandReconciler, Digest, HardwareProbe, HealthProbe, NodeComposition,
+    NodeState, PreparedArtifact, PreparedRuntime, ProcessHandle, ProcessManager, ProcessPlan,
+    ReadinessProbe, ReconcileAction, ReconcileEvidence, RuntimeAdapter, RuntimePreparer,
+    RuntimeRequest,
 };
 use burncloud_router::local_attachment::LocalRouteAttachmentId;
 use burncloud_supply_model::{
-    LocalModelUnsupported, ModelResolutionOutcome, ModelResolutionRequest, ModelResolver,
-    ResolvedModel,
+    CandidateResolutionOutcome, LocalModelUnsupported, ModelResolutionRequest, ModelResolver,
+    ResolvedModel, ResolvedModelCandidate,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -62,6 +62,8 @@ pub enum LocalPreparationOutcome {
 #[derive(Debug, Default)]
 struct ModelWorkload {
     reconciler: DemandReconciler,
+    candidates: Vec<ResolvedModelCandidate>,
+    candidate_index: usize,
     resolved: Option<ResolvedModel>,
     artifact: Option<PreparedArtifact>,
     runtime: Option<PreparedRuntime>,
@@ -70,6 +72,16 @@ struct ModelWorkload {
     attachment_id: Option<LocalRouteAttachmentId>,
     detached_attachment_id: Option<LocalRouteAttachmentId>,
     unsupported: Option<LocalModelUnsupported>,
+}
+
+fn resolved_model_from_candidate(candidate: &ResolvedModelCandidate) -> ResolvedModel {
+    ResolvedModel {
+        model: candidate.model_name.clone(),
+        artifact_source: candidate.artifact_uri.clone(),
+        artifact_digest: Some(candidate.checksum.clone()),
+        runtime: candidate.runtime.clone(),
+        runtime_version: None,
+    }
 }
 
 #[derive(Debug)]
@@ -86,7 +98,7 @@ where
     M: ModelResolver,
     T: RuntimeAdapter,
     H: HardwareProbe,
-    A: ArtifactPreparer,
+    A: ArtifactPreparation,
     R: RuntimePreparer,
     P: ProcessManager,
     Q: ReadinessProbe,
@@ -153,6 +165,105 @@ where
         if let Some(state) = self.workload_state(model) {
             self.request_state.publish(model, state);
         }
+    }
+
+    async fn resolve_candidates_for(
+        &self,
+        model: &str,
+    ) -> anyhow::Result<CandidateResolutionOutcome> {
+        let hardware = self.machine.hardware().inspect().await?;
+        let supported_runtimes = self.machine.runtimes().supported_runtimes();
+        Ok(self
+            .resolver
+            .resolve_candidates(
+                ModelResolutionRequest {
+                    model: model.to_owned(),
+                    hardware,
+                },
+                &supported_runtimes,
+            )
+            .await?)
+    }
+
+    /// 探测当前 Node，并返回请求模型的全部兼容候选。
+    ///
+    /// 用途：为模型选择界面或自动选择策略提供阶段三的候选结果。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use burncloud_node_runtime::{
+    /// #     FakeArtifactPreparer, FakeHealthProbe, FakeProcessManager,
+    /// #     FakeReadinessProbe, FakeRuntimeAdapter, FakeRuntimePreparer,
+    /// #     NodeComposition, SystemHardwareProbe,
+    /// # };
+    /// # use burncloud_server::node_orchestrator::{ModelDemand, NodeOrchestrator};
+    /// # use burncloud_supply_model::FakeModelResolver;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let node = NodeOrchestrator::new(
+    ///     FakeModelResolver,
+    ///     FakeRuntimeAdapter,
+    ///     NodeComposition::start(
+    ///         SystemHardwareProbe::new(),
+    ///         FakeArtifactPreparer,
+    ///         FakeRuntimePreparer,
+    ///         FakeProcessManager::default(),
+    ///         FakeReadinessProbe,
+    ///         FakeHealthProbe,
+    ///     ),
+    /// );
+    /// let _ = node.resolve_candidates(ModelDemand::new("demo")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 注意事项：该方法只解析和筛选，不下载模型、不准备 Runtime，也不启动进程。
+    pub async fn resolve_candidates(
+        &self,
+        demand: ModelDemand,
+    ) -> anyhow::Result<CandidateResolutionOutcome> {
+        self.resolve_candidates_for(&demand.model).await
+    }
+
+    fn select_candidate(&mut self, model: &str, index: usize) -> anyhow::Result<()> {
+        let candidate = self
+            .workloads
+            .get(model)
+            .and_then(|workload| workload.candidates.get(index))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("candidate {index} missing for model '{model}'"))?;
+
+        let workload = self
+            .workloads
+            .get_mut(model)
+            .ok_or_else(|| anyhow::anyhow!("workload missing for model '{model}'"))?;
+        workload.candidate_index = index;
+        workload.resolved = Some(resolved_model_from_candidate(&candidate));
+        workload.artifact = None;
+        workload.runtime = None;
+        workload.plan = None;
+        workload.process = None;
+        Ok(())
+    }
+
+    fn retry_next_candidate(&mut self, model: &str) -> anyhow::Result<bool> {
+        let next_index = self.workloads.get(model).and_then(|workload| {
+            let next = workload.candidate_index + 1;
+            (next < workload.candidates.len()).then_some(next)
+        });
+        let Some(next_index) = next_index else {
+            return Ok(false);
+        };
+
+        self.observe(model, ReconcileEvidence::Failed)?;
+        self.select_candidate(model, next_index)?;
+        self.workloads
+            .get_mut(model)
+            .ok_or_else(|| anyhow::anyhow!("workload missing for model '{model}'"))?
+            .reconciler
+            .retry()?;
+        self.observe(model, ReconcileEvidence::Resolved)?;
+        Ok(true)
     }
 
     fn next_action(&mut self, model: &str) -> anyhow::Result<ReconcileAction> {
@@ -292,34 +403,33 @@ where
             let action = self.next_action(&demand.model)?;
             match action {
                 ReconcileAction::Resolve => {
-                    let hardware = match self.machine.hardware().inspect().await {
-                        Ok(hardware) => hardware,
+                    let resolution = match self.resolve_candidates_for(&demand.model).await {
+                        Ok(resolution) => resolution,
                         Err(error) => {
                             self.mark_failed(&demand.model)?;
-                            return Err(error.into());
+                            return Err(error);
                         }
                     };
-                    let accelerator_memory_bytes = hardware
-                        .accelerators
-                        .iter()
-                        .filter_map(|a| a.memory_bytes)
-                        .max();
-                    match self
-                        .resolver
-                        .resolve(ModelResolutionRequest {
-                            model: demand.model.clone(),
-                            accelerator_memory_bytes,
-                        })
-                        .await
-                    {
-                        Ok(ModelResolutionOutcome::Local(resolved)) => {
-                            self.workloads
-                                .get_mut(&demand.model)
-                                .expect("workload must exist")
-                                .resolved = Some(resolved);
+                    match resolution {
+                        CandidateResolutionOutcome::Candidates(candidates)
+                            if !candidates.is_empty() =>
+                        {
+                            let workload =
+                                self.workloads.get_mut(&demand.model).ok_or_else(|| {
+                                    anyhow::anyhow!("workload missing for model '{}'", demand.model)
+                                })?;
+                            workload.candidates = candidates;
+                            workload.candidate_index = 0;
+                            self.select_candidate(&demand.model, 0)?;
                             self.observe(&demand.model, ReconcileEvidence::Resolved)?;
                         }
-                        Ok(ModelResolutionOutcome::Unsupported(reason)) => {
+                        CandidateResolutionOutcome::Candidates(_) => {
+                            let reason = LocalModelUnsupported {
+                                model: demand.model.clone(),
+                                reason:
+                                    burncloud_supply_model::LocalModelUnsupportedReason::
+                                        NoCompatibleVariant,
+                            };
                             self.workloads
                                 .get_mut(&demand.model)
                                 .expect("workload must exist")
@@ -327,9 +437,13 @@ where
                             self.observe(&demand.model, ReconcileEvidence::LocalUnsupported)?;
                             return Ok(LocalPreparationOutcome::Unsupported(reason));
                         }
-                        Err(error) => {
-                            self.mark_failed(&demand.model)?;
-                            return Err(error.into());
+                        CandidateResolutionOutcome::Unsupported(reason) => {
+                            self.workloads
+                                .get_mut(&demand.model)
+                                .expect("workload must exist")
+                                .unsupported = Some(reason.clone());
+                            self.observe(&demand.model, ReconcileEvidence::LocalUnsupported)?;
+                            return Ok(LocalPreparationOutcome::Unsupported(reason));
                         }
                     }
                 }
@@ -339,45 +453,65 @@ where
                         .get(&demand.model)
                         .and_then(|workload| workload.resolved.clone())
                         .ok_or_else(|| anyhow::anyhow!("resolved model receipt missing"))?;
+                    let artifact_url = match reqwest::Url::parse(&resolved.artifact_source) {
+                        Ok(url) => url,
+                        Err(error) => {
+                            let failure = anyhow::anyhow!(
+                                "invalid artifact source '{}': {error}",
+                                resolved.artifact_source
+                            );
+                            if self.retry_next_candidate(&demand.model)? {
+                                continue;
+                            }
+                            self.mark_failed(&demand.model)?;
+                            return Err(failure);
+                        }
+                    };
+                    let expected_digest = match resolved.artifact_digest {
+                        Some(value) => match Digest::parse(&value) {
+                            Ok(digest) => digest,
+                            Err(error) => {
+                                let failure =
+                                    anyhow::anyhow!("invalid artifact digest '{}': {error}", value);
+                                if self.retry_next_candidate(&demand.model)? {
+                                    continue;
+                                }
+                                self.mark_failed(&demand.model)?;
+                                return Err(failure);
+                            }
+                        },
+                        None => {
+                            let failure = anyhow::anyhow!("artifact digest is required");
+                            if self.retry_next_candidate(&demand.model)? {
+                                continue;
+                            }
+                            self.mark_failed(&demand.model)?;
+                            return Err(failure);
+                        }
+                    };
                     let artifact = match self
                         .machine
                         .artifacts()
-                        .prepare(ArtifactRequest::new(
-                            match ArtifactSource::parse(&resolved.artifact_source) {
-                                Ok(source) => source,
-                                Err(error) => {
-                                    self.mark_failed(&demand.model)?;
-                                    return Err(anyhow::anyhow!(
-                                        "invalid artifact source '{}': {error}",
-                                        resolved.artifact_source
-                                    ));
-                                }
-                            },
-                            match resolved.artifact_digest {
-                                Some(value) => match Digest::parse(&value) {
-                                    Ok(digest) => Some(digest),
-                                    Err(error) => {
-                                        self.mark_failed(&demand.model)?;
-                                        return Err(anyhow::anyhow!(
-                                            "invalid artifact digest '{}': {error}",
-                                            value
-                                        ));
-                                    }
-                                },
-                                None => None,
-                            },
-                        ))
+                        .prepare(artifact_url, expected_digest)
                         .await
                     {
                         Ok(artifact) => artifact,
                         Err(error) => {
+                            if self.retry_next_candidate(&demand.model)? {
+                                continue;
+                            }
                             self.mark_failed(&demand.model)?;
                             return Err(error.into());
                         }
                     };
                     if !artifact.is_verified() {
+                        let failure =
+                            anyhow::anyhow!("artifact preparer returned unverified artifact");
+                        if self.retry_next_candidate(&demand.model)? {
+                            continue;
+                        }
                         self.mark_failed(&demand.model)?;
-                        anyhow::bail!("artifact preparer returned unverified artifact");
+                        return Err(failure);
                     }
                     self.workloads
                         .get_mut(&demand.model)
@@ -402,6 +536,9 @@ where
                     {
                         Ok(runtime) => runtime,
                         Err(error) => {
+                            if self.retry_next_candidate(&demand.model)? {
+                                continue;
+                            }
                             self.mark_failed(&demand.model)?;
                             return Err(error.into());
                         }
@@ -428,6 +565,9 @@ where
                     let plan = match self.runtime_adapter.plan(&runtime, &artifact).await {
                         Ok(plan) => plan,
                         Err(error) => {
+                            if self.retry_next_candidate(&demand.model)? {
+                                continue;
+                            }
                             self.mark_failed(&demand.model)?;
                             return Err(error.into());
                         }
@@ -445,6 +585,9 @@ where
                     let handle = match self.machine.processes().start(plan.process.clone()).await {
                         Ok(handle) => handle,
                         Err(error) => {
+                            if self.retry_next_candidate(&demand.model)? {
+                                continue;
+                            }
                             self.mark_failed(&demand.model)?;
                             return Err(error.into());
                         }
@@ -570,17 +713,18 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use burncloud_node_runtime::{
-        ArtifactVerificationStatus, FakeArtifactPreparer, FakeHardwareProbe, FakeHealthProbe,
-        FakeProcessManager, FakeReadinessProbe, FakeRuntimeAdapter, FakeRuntimePreparer,
+        ArtifactVerificationStatus, FakeArtifactPreparer, FakeHealthProbe, FakeProcessManager,
+        FakeReadinessProbe, FakeRuntimeAdapter, FakeRuntimePreparer, SystemHardwareProbe,
     };
     use burncloud_supply_model::{
         FakeModelResolver, LocalModelUnsupportedReason, ModelResolutionError,
+        ModelResolutionOutcome,
     };
 
     fn fake_orchestrator() -> NodeOrchestrator<
         FakeModelResolver,
         FakeRuntimeAdapter,
-        FakeHardwareProbe,
+        SystemHardwareProbe,
         FakeArtifactPreparer,
         FakeRuntimePreparer,
         FakeProcessManager,
@@ -591,7 +735,7 @@ mod tests {
             FakeModelResolver,
             FakeRuntimeAdapter,
             NodeComposition::start(
-                FakeHardwareProbe::default(),
+                SystemHardwareProbe::new(),
                 FakeArtifactPreparer,
                 FakeRuntimePreparer,
                 FakeProcessManager::default(),
@@ -642,7 +786,7 @@ mod tests {
     async fn failed_resolution_converges_to_failed_and_stops_reporting_preparing() {
         let request_state = NodeRequestState::default();
         let machine = NodeComposition::start(
-            FakeHardwareProbe::default(),
+            SystemHardwareProbe::new(),
             FakeArtifactPreparer,
             FakeRuntimePreparer,
             FakeProcessManager::default(),
@@ -795,7 +939,7 @@ mod tests {
             .expect("workload")
             .resolved = Some(ResolvedModel {
             model: model.into(),
-            artifact_source: "qwen/fake.gguf".into(),
+            artifact_source: "https://modelscope.cn/models/qwen-4b/resolve/main/fake.gguf".into(),
             artifact_digest: Some(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             ),
@@ -833,7 +977,8 @@ mod tests {
             let workload = orchestrator.workloads.get_mut(model).expect("workload");
             workload.resolved = Some(ResolvedModel {
                 model: model.into(),
-                artifact_source: "qwen/fake.gguf".into(),
+                artifact_source: "https://modelscope.cn/models/qwen-4b/resolve/main/fake.gguf"
+                    .into(),
                 artifact_digest: Some(
                     "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                         .into(),
@@ -852,9 +997,7 @@ mod tests {
             .artifact = Some(
             PreparedArtifact::new(
                 std::env::temp_dir().join("burncloud/fake/artifacts/qwen_fake.gguf"),
-                // The status replaced a bool that meant "verification succeeded". `Verified` is the
-                // faithful translation; `NotRequired` also maps to `is_verified() == true` but would
-                // describe a different scenario, and `Failed` would reverse the fixture.
+                // 测试回执必须明确表示已完成摘要校验并通过。
                 ArtifactVerificationStatus::Verified,
             )
             .unwrap(),
@@ -892,7 +1035,8 @@ mod tests {
             let workload = orchestrator.workloads.get_mut(model).expect("workload");
             workload.resolved = Some(ResolvedModel {
                 model: model.into(),
-                artifact_source: "qwen/fake.gguf".into(),
+                artifact_source: "https://modelscope.cn/models/qwen-4b/resolve/main/fake.gguf"
+                    .into(),
                 artifact_digest: Some(
                     "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                         .into(),
@@ -911,9 +1055,7 @@ mod tests {
             .artifact = Some(
             PreparedArtifact::new(
                 std::env::temp_dir().join("burncloud/fake/artifacts/qwen_fake.gguf"),
-                // The status replaced a bool that meant "verification succeeded". `Verified` is the
-                // faithful translation; `NotRequired` also maps to `is_verified() == true` but would
-                // describe a different scenario, and `Failed` would reverse the fixture.
+                // 测试回执必须明确表示已完成摘要校验并通过。
                 ArtifactVerificationStatus::Verified,
             )
             .unwrap(),
@@ -951,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_local_model_stops_before_any_preparation_or_route_state() {
         let machine = NodeComposition::start(
-            FakeHardwareProbe::default(),
+            SystemHardwareProbe::new(),
             FakeArtifactPreparer,
             FakeRuntimePreparer,
             FakeProcessManager::default(),

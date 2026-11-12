@@ -1,7 +1,7 @@
 //! Chat 首页页面组合与交互事件。
 
 use super::{
-    backend::{ChatBackend, LocalBackend},
+    backend::{ChatBackend, HttpBackend},
     catalog,
     model::{
         gib, resource_label, ChatMessage, ChatModel, HardwareEvent, MessageRole, Preparation,
@@ -44,14 +44,14 @@ const LIVEVIEW_ENTER_PREVENT_DEFAULT: &str =
 /// # Notes
 ///
 /// `/` 和 `/home` 使用同一组件。目录来自主服务的模型选择接口，与网关共用监听端口。
-/// 检测仍为本地模拟；当前目录选择只交接仓库快照，缺少工件清单时明确停止。
+/// 硬件检测通过公开的 `/api/node/hardware` 获取 Node 主机快照；当前目录选择只交接仓库快照，缺少工件清单时明确停止。
 /// 底层文件下载与校验能力保留，但正常目录入口不执行真实下载、部署或推理。
 /// 状态只存在于当前客户端会话，目录可访问不代表已部署。
 #[component]
 pub fn ChatHome() -> Element {
     use_context_provider(|| {
         try_consume_context::<BackendHandle>()
-            .unwrap_or_else(|| BackendHandle(Rc::new(LocalBackend)))
+            .unwrap_or_else(|| BackendHandle(Rc::new(HttpBackend::default())))
     });
     use_context_provider(|| ChatScope(Runtime::current().current_scope_id()));
     let mut state = use_signal(|| try_consume_context::<ChatState>().unwrap_or_default());
@@ -318,7 +318,7 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
         (
             "GPU",
             format!(
-                "{} · 单卡最大可用显存 {}",
+                "{} · 单卡最大显存容量 {}",
                 hardware
                     .gpus
                     .as_ref()
@@ -337,7 +337,7 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
         ),
         (
             "内存",
-            format!("可用 {}", resource_label(hardware.ram_bytes)),
+            format!("总量 {}", resource_label(hardware.ram_bytes)),
             preparation
                 .hardware_events
                 .iter()
@@ -383,7 +383,7 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
             }
             if let Some(selection) = preparation.model.catalog_selection.as_ref() {
                 p { class: "chat-preparation-note", "{selection.name} · {selection.version.source} · {selection.version.model} · {selection.version.revision}" }
-                p { class: "chat-preparation-note", "当前硬件检测使用模拟数据，不代表本机真实配置；当前入口未提供可下载工件，检测后会提示能力未接入，不执行真实下载或部署。" }
+                p { class: "chat-preparation-note", "硬件检测与量化版本解析来自 Node 主服务；当前入口不执行真实下载、校验或部署。" }
             }
             if !preparation.collapsed {
                 if stage != PreparationStage::AwaitingStart {
@@ -417,7 +417,15 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
                                 },
                                 span {
                                     strong { {variant.quantization} }
-                                    small { "最低内存 {gib(variant.ram_bytes)} GiB · 显存 {gib(variant.vram_bytes)} GiB · 磁盘 {gib(variant.disk_bytes)} GiB" }
+                                    small {
+                                        "最低内存 {gib(variant.ram_bytes)} GiB · "
+                                        if variant.vram_bytes == 0 {
+                                            "显存要求未声明"
+                                        } else {
+                                            "显存 {gib(variant.vram_bytes)} GiB"
+                                        }
+                                        " · 磁盘 {gib(variant.disk_bytes)} GiB"
+                                    }
                                 }
                                 span { "下载此版本" }
                             }
@@ -726,14 +734,36 @@ fn spawn_preparation(mut state: Signal<ChatState>, run_id: u64) {
         .read()
         .preparation()
         .is_some_and(|p| p.run_id == run_id && p.stage == PreparationStage::Detecting);
+    let selection_for_resolution = state.read().resolution_selection(run_id);
+    let model_for_resolution = state.read().resolution_model(run_id);
     let handle = Runtime::current().spawn(owner, async move {
         if detecting {
-            let result = backend
-                .detect_hardware(Box::new(move |event| {
-                    state.with_mut(|value| value.hardware_event(run_id, event))
-                }))
-                .await;
-            state.with_mut(|value| value.finish_hardware(run_id, result));
+            let result = if let Some(selection) = selection_for_resolution {
+                backend
+                    .resolve_catalog_model(
+                        selection,
+                        Box::new(move |event| {
+                            state.with_mut(|value| value.hardware_event(run_id, event))
+                        }),
+                    )
+                    .await
+            } else if let Some(model) = model_for_resolution {
+                backend
+                    .resolve_model(
+                        model,
+                        Box::new(move |event| {
+                            state.with_mut(|value| value.hardware_event(run_id, event))
+                        }),
+                    )
+                    .await
+            } else {
+                Err(super::model::ChatError {
+                    kind: super::model::ErrorKind::InvalidResult,
+                    operation: super::model::Operation::Resolve,
+                    reason: "模型解析任务已失效".into(),
+                })
+            };
+            state.with_mut(|value| value.finish_model_resolution(run_id, result));
         } else {
             let request = state.read().initialization_request(run_id);
             if let Some(request) = request {

@@ -1,18 +1,15 @@
 use async_trait::async_trait;
+use burncloud_node_runtime::HardwareProfile;
 
-/// 供模型编排层使用的解析请求。
+/// 已选模型和本次真实探测结果，供 Supply 执行硬件兼容性判断。
 ///
-/// 用途：描述调用方请求的模型和已检测到的最大加速器显存。
-///
-/// 注意事项：该请求是现有 Node 编排契约的一部分；阶段三需要完整 RAM、磁盘和 Runtime
-/// 信息时，使用 `RealModelResolver::resolve_with_capabilities`。Resolver 不通过网络扫描
-/// 模型文件，也不负责构建 artifact URI。
+/// 硬件容量来自 Node 的公开探测接口；未知显存保留为 `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelResolutionRequest {
-    /// 请求的模型名称。
+    /// 已选逻辑模型名。
     pub model: String,
-    /// 已检测到的最大加速器显存，单位为字节。
-    pub accelerator_memory_bytes: Option<u64>,
+    /// 本次探测的完整硬件快照，包含 RAM、磁盘和各加速器的显存。
+    pub hardware: HardwareProfile,
 }
 
 /// 已完成执行选择的模型结果。
@@ -135,7 +132,7 @@ pub enum ModelResolutionOutcome {
 pub enum CandidateResolutionOutcome {
     /// 过滤后仍然可用的候选模型，顺序与清单中的 Variant 顺序一致。
     Candidates(Vec<ResolvedModelCandidate>),
-    /// 没有任何 Variant 同时满足硬件和 Runtime 条件。
+    /// 没有任何 Variant 同时满足硬件、Runtime 和磁盘条件。
     Unsupported(LocalModelUnsupported),
 }
 
@@ -151,13 +148,15 @@ pub enum ModelResolutionError {
 ///
 /// 用途：为 Node 编排层提供统一的模型解析入口。
 ///
-/// 实现必须基于已经加载的模型元数据工作，不得在 `resolve` 内部递归扫描模型文件、
-/// 查询 HuggingFace 文件树或构建下载 URL。阶段三的候选过滤入口是
-/// `RealModelResolver::resolve_with_capabilities`，它直接返回全部兼容 Variant。
+/// 实现必须基于已经加载的模型元数据和调用方提供的硬件快照工作，不得在 `resolve`
+/// 内部递归扫描模型文件、查询 HuggingFace 文件树或构建下载 URL。阶段三的通用候选入口
+/// 是 `resolve_candidates`，它接收调用方的 Runtime 能力并返回全部兼容 Variant；
+/// `RealModelResolver::resolve_with_capabilities` 是该实现的同步便捷入口。
 ///
 /// # Examples
 ///
 /// ```
+/// use burncloud_node_runtime::HardwareProfile;
 /// use burncloud_supply_model::{FakeModelResolver, ModelResolutionRequest, ModelResolver};
 ///
 /// # #[tokio::main]
@@ -165,7 +164,12 @@ pub enum ModelResolutionError {
 /// let result = FakeModelResolver
 ///     .resolve(ModelResolutionRequest {
 ///         model: "demo".into(),
-///         accelerator_memory_bytes: Some(8),
+///         hardware: HardwareProfile {
+///             cpu: "example".into(),
+///             memory_bytes: 8,
+///             disk_available_bytes: 8,
+///             accelerators: Vec::new(),
+///         },
 ///     })
 ///     .await;
 /// assert!(result.is_ok());
@@ -178,6 +182,89 @@ pub trait ModelResolver: Send + Sync {
         &self,
         request: ModelResolutionRequest,
     ) -> Result<ModelResolutionOutcome, ModelResolutionError>;
+
+    /// 根据调用方提供的 Runtime 能力返回全部兼容候选。
+    ///
+    /// 用途：为 Node 的候选选择和失败重试提供统一入口。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use burncloud_node_runtime::HardwareProfile;
+    /// # use burncloud_supply_model::{
+    /// #     FakeModelResolver, ModelResolutionRequest, ModelResolver,
+    /// # };
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let candidates = FakeModelResolver
+    ///     .resolve_candidates(
+    ///         ModelResolutionRequest {
+    ///             model: "demo".into(),
+    ///             hardware: HardwareProfile {
+    ///                 cpu: "example".into(),
+    ///                 memory_bytes: 8,
+    ///                 disk_available_bytes: 8,
+    ///                 accelerators: Vec::new(),
+    ///             },
+    ///         },
+    ///         &["llama.cpp".into()],
+    ///     )
+    ///     .await?;
+    /// # let _ = candidates;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// 注意事项：旧版 Resolver 如果没有覆盖此方法，会把 `resolve()` 的单个结果
+    /// 适配成一个候选；阶段三的真实 Resolver 应返回完整候选列表。
+    async fn resolve_candidates(
+        &self,
+        request: ModelResolutionRequest,
+        supported_runtimes: &[String],
+    ) -> Result<CandidateResolutionOutcome, ModelResolutionError> {
+        if supported_runtimes
+            .iter()
+            .any(|runtime| runtime.trim().is_empty())
+        {
+            return Err(ModelResolutionError::ResolutionFailed(
+                "supported runtime names must not be empty".into(),
+            ));
+        }
+
+        let outcome = self.resolve(request).await?;
+        match outcome {
+            ModelResolutionOutcome::Local(resolved) => {
+                if !supported_runtimes
+                    .iter()
+                    .any(|runtime| runtime == &resolved.runtime)
+                {
+                    return Ok(CandidateResolutionOutcome::Unsupported(
+                        LocalModelUnsupported {
+                            model: resolved.model,
+                            reason: LocalModelUnsupportedReason::NoCompatibleVariant,
+                        },
+                    ));
+                }
+
+                let model_name = resolved.model.clone();
+                Ok(CandidateResolutionOutcome::Candidates(vec![
+                    ResolvedModelCandidate {
+                        model_name,
+                        variant_id: resolved.model,
+                        quantization: String::new(),
+                        min_ram_bytes: 0,
+                        min_vram_bytes: 0,
+                        disk_size_bytes: 0,
+                        runtime: resolved.runtime,
+                        artifact_uri: resolved.artifact_source,
+                        checksum: resolved.artifact_digest.unwrap_or_default(),
+                    },
+                ]))
+            }
+            ModelResolutionOutcome::Unsupported(reason) => {
+                Ok(CandidateResolutionOutcome::Unsupported(reason))
+            }
+        }
+    }
 }
 
 /// 用于 Node 编排测试的确定性 Resolver。
@@ -193,7 +280,10 @@ impl ModelResolver for FakeModelResolver {
         request: ModelResolutionRequest,
     ) -> Result<ModelResolutionOutcome, ModelResolutionError> {
         Ok(ModelResolutionOutcome::Local(ResolvedModel {
-            artifact_source: format!("{}/fake.gguf", request.model),
+            artifact_source: format!(
+                "https://modelscope.cn/models/{}/resolve/main/fake.gguf",
+                request.model
+            ),
             artifact_digest: Some(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             ),

@@ -27,35 +27,9 @@ fn manifest_round_trips_through_json() {
 }
 
 #[test]
-fn default_manifest_loads_shared_models_with_variant_identifiers() {
+fn default_manifest_is_empty_after_switching_to_external_model_discovery() {
     let manifests = load_default_manifests().unwrap();
-
-    assert_eq!(
-        manifests
-            .iter()
-            .map(|manifest| manifest.model_name.as_str())
-            .collect::<Vec<_>>(),
-        ["qwen2.5:1.5b", "qwen2.5:3b", "llama3.2:1b"]
-    );
-    assert!(manifests
-        .iter()
-        .all(|manifest| !manifest.variants.is_empty()));
-    assert_eq!(
-        manifests
-            .iter()
-            .flat_map(|manifest| manifest.variants.iter())
-            .map(|variant| (variant.id.as_str(), variant.backend.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            ("qwen2.5-1.5b-instruct-q4_k_m", "llama.cpp"),
-            ("qwen2.5-3b-instruct-q4_k_m", "llama.cpp"),
-            ("llama3.2-1b-instruct-q8_0", "llama.cpp"),
-        ]
-    );
-    assert!(manifests
-        .iter()
-        .flat_map(|manifest| manifest.variants.iter())
-        .all(|variant| !variant.artifact_uri.starts_with("file:///")));
+    assert!(manifests.is_empty());
 }
 
 #[test]

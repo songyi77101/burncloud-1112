@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_MANIFEST_JSON: &str = include_str!("../data/model_manifests.json");
+// 默认清单已移除；模型解析现在直接读取前端选中的外部仓库模型。
+const DEFAULT_MANIFEST_JSON: &str = "[]";
 
 /// 描述一个逻辑模型及其可运行 Variant 的 Manifest。
 ///
@@ -85,8 +86,8 @@ pub fn parse_manifests(json: &str) -> Result<Vec<ModelManifest>, serde_json::Err
 
 /// 加载随 Supply Model 发布的默认 Manifest 清单。
 ///
-/// 用途：为阶段三提供静态、版本受控的默认模型来源；清单在编译时随 crate 打包，
-/// 调用时只执行一次 JSON 反序列化。
+/// 用途：保留旧调用方的兼容入口。默认清单不再包含任何模型；服务端解析必须使用
+/// 前端提交的外部仓库模型并实时发现其工件。
 ///
 /// 返回值：返回默认清单中的全部 Manifest；清单格式错误时返回 `serde_json::Error`。
 ///
@@ -97,7 +98,7 @@ pub fn parse_manifests(json: &str) -> Result<Vec<ModelManifest>, serde_json::Err
 /// use burncloud_supply_model::load_default_manifests;
 ///
 /// let manifests = load_default_manifests()?;
-/// assert!(!manifests.is_empty());
+/// assert!(manifests.is_empty());
 /// # Ok(())
 /// # }
 /// ```

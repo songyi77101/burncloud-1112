@@ -99,6 +99,104 @@ async fn collect(
 }
 
 #[tokio::test]
+async fn selected_catalog_model_resolution_parses_the_node_contract() {
+    let checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let service = json_server(vec![json!({
+        "success": true,
+        "data": {
+            "status": "resolved",
+            "model": "Qwen/Qwen3-8B",
+            "hardware": {
+                "platform": "windows",
+                "arch": "x86_64",
+                "cpu": "测试 CPU",
+                "memory_bytes": 8589934592u64,
+                "disk_available_bytes": 17179869184u64,
+                "accelerators": [{"kind":"nvidia","name":"测试 GPU","memory_bytes":4294967296u64}]
+            },
+            "candidates": [{
+                "model_name":"Qwen/Qwen3-8B",
+                "variant_id":"Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf",
+                "quantization":"Q4_K_M",
+                "min_ram_bytes":4294967296u64,
+                "min_vram_bytes":0u64,
+                "disk_size_bytes":1929903008u64,
+                "runtime":"llama.cpp",
+                "artifact_uri":"https://example.invalid/qwen.gguf",
+                "checksum":checksum
+            }]
+        }
+    })])
+    .await;
+    let selection = CatalogSelection {
+        name: "Qwen3-8B".into(),
+        preset: Some("qwen3-8b".into()),
+        version: version(),
+    };
+
+    let resolution = service
+        .client
+        .resolve_model(&selection)
+        .await
+        .expect("模型解析");
+    assert_eq!(
+        resolution.variants[0].id,
+        "Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf"
+    );
+    assert_eq!(resolution.variants[0].expected_sha256, checksum);
+    assert_eq!(resolution.variants[0].vram_bytes, 0);
+    assert_eq!(resolution.hardware.max_vram(), Some(4294967296));
+
+    let calls = service.requests.lock().expect("请求记录");
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].starts_with("POST /api/node/models/resolve"));
+    assert!(calls[0].contains("Qwen/Qwen3-8B"));
+    assert!(calls[0].contains("modelscope"));
+    assert!(calls[0].contains("master"));
+}
+
+#[tokio::test]
+async fn model_resolution_rejects_mismatched_candidate_model() {
+    let service = json_server(vec![json!({
+        "success": true,
+        "data": {
+            "status": "resolved",
+            "model": "qwen2.5:3b",
+            "hardware": {
+                "platform": "windows",
+                "arch": "x86_64",
+                "cpu": "测试 CPU",
+                "memory_bytes": 8,
+                "disk_available_bytes": 8,
+                "accelerators": []
+            },
+            "candidates": [{
+                "model_name":"other",
+                "variant_id":"other-q4",
+                "quantization":"Q4_K_M",
+                "min_ram_bytes":1,
+                "min_vram_bytes":0,
+                "disk_size_bytes":1,
+                "runtime":"llama.cpp",
+                "artifact_uri":"https://example.invalid/model.gguf",
+                "checksum":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        }
+    })])
+    .await;
+
+    assert!(service
+        .client
+        .resolve_model(&CatalogSelection {
+            name: "Qwen3-8B".into(),
+            preset: None,
+            version: version(),
+        })
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn presets_load_from_main_service_with_flat_resources() {
     let service = json_server(vec![json!([item(true, "modelscope")])]).await;
     let pages = collect(&service.client, " ").await.expect("预置列表");
@@ -168,6 +266,91 @@ async fn one_status_request_resolves_each_selection_and_accepts_four_states() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn hardware_snapshot_decodes_server_contract_and_preserves_unknown_memory() {
+    let service = json_server(vec![json!({
+        "success": true,
+        "data": {
+            "platform": "windows",
+            "arch": "x86_64",
+            "cpu": "Example CPU",
+            "memory_bytes": 16 * 1024 * 1024 * 1024_u64,
+            "disk_available_bytes": 32 * 1024 * 1024 * 1024_u64,
+            "accelerators": [{
+                "kind": "nvidia",
+                "name": "Example GPU",
+                "memory_bytes": null
+            }]
+        }
+    })])
+    .await;
+
+    let hardware = service.client.inspect_hardware().await.expect("硬件快照");
+    assert_eq!(hardware.platform, Some(Platform::Windows));
+    assert_eq!(hardware.cpu.as_deref(), Some("Example CPU"));
+    assert_eq!(hardware.ram_bytes, Some(16 * 1024 * 1024 * 1024));
+    assert_eq!(hardware.disk_bytes, Some(32 * 1024 * 1024 * 1024));
+    assert_eq!(hardware.gpus.as_ref().map(Vec::len), Some(1));
+    assert_eq!(
+        hardware
+            .gpus
+            .as_ref()
+            .and_then(|gpus| gpus[0].available_bytes),
+        None
+    );
+    assert!(service.requests.lock().expect("请求")[0].starts_with("GET /api/node/hardware"));
+}
+
+#[tokio::test]
+async fn hardware_error_response_preserves_public_error_message() {
+    let service = server(
+        vec![(
+            501,
+            json!({
+                "success": false,
+                "error": {
+                    "code": "unsupported_platform",
+                    "message": "当前平台暂不支持硬件检测"
+                }
+            })
+            .to_string(),
+        )],
+        Duration::ZERO,
+        Duration::from_secs(2),
+    )
+    .await;
+
+    let error = service
+        .client
+        .inspect_hardware()
+        .await
+        .expect_err("错误响应必须失败");
+    assert_eq!(error.kind, super::super::model::ErrorKind::ExecutionFailed);
+    assert!(error.reason.contains("unsupported_platform"));
+    assert!(error.reason.contains("当前平台暂不支持硬件检测"));
+}
+#[tokio::test]
+async fn hardware_snapshot_rejects_unknown_accelerator_kind() {
+    let service = json_server(vec![json!({
+        "success": true,
+        "data": {
+            "platform": "linux",
+            "arch": "x86_64",
+            "cpu": "Example CPU",
+            "memory_bytes": 1,
+            "disk_available_bytes": 1,
+            "accelerators": [{
+                "kind": "unknown",
+                "name": "Example GPU",
+                "memory_bytes": 1
+            }]
+        }
+    })])
+    .await;
+
+    assert!(service.client.inspect_hardware().await.is_err());
 }
 
 #[tokio::test]

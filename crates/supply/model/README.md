@@ -10,8 +10,8 @@ It owns:
 - `model_capabilities` capability persistence defined by #621;
 - Model manifest and variant structures;
 - Model resolver interfaces and current resolver implementations;
-- HuggingFace model-list discovery;
-- model data-directory configuration.
+- HuggingFace discovery/file traversal helpers;
+- model download URL/data-directory helpers.
 
 It does not own canonical pricing truth (Commerce), Traffic routing, database
 schema migrations, or runtime process lifecycle.
@@ -19,26 +19,6 @@ schema migrations, or runtime process lifecycle.
 The Cargo package is `burncloud-supply-model`, and the Rust crate import is
 `burncloud_supply_model`. The temporary `burncloud_service_models`
 compatibility surface used during #778 was removed by #780.
-
-## 阶段一到阶段三
-
-- 阶段一：`ModelManifest`、`Variant` 描述模型、量化版本、Runtime 和工件资源要求。
-- 阶段二：`RealModelResolver` 保存清单，按 RAM、最大单卡 VRAM 和 Runtime 过滤 Variant。
-- 阶段三：`resolve_with_capabilities` 加入磁盘过滤，按清单顺序返回全部兼容候选，
-  保留模型编号与 Variant 编号；无兼容候选时返回 `Unsupported`。
-
-`RealModelResolver::new` 返回 `Result`，拒绝未在 Manifest 中声明的 Variant 后端。
-`load_default_manifests` 加载内置清单，`parse_manifests` 解析外部 JSON；
-解析后的清单由 `RealModelResolver::new` 校验后使用。
-内置清单的 RAM/VRAM 数值是演示预算，不代表实测最低配置。
-
-```sh
-cargo run -p burncloud-supply-model --example phase_three -- --model qwen2.5:1.5b --ram-bytes 8589934592 --vram-bytes 4294967296 --disk-bytes 10737418240 --runtime llama.cpp
-```
-
-可通过 `--manifest <manifest.json>` 指定外部清单。该示例只筛选候选，不下载工件、
-启动 Runtime、打分或选择推荐项。历史文件遍历、GGUF 筛选和下载 URL 构建接口及其
-示例已移除；调用方直接提供 Manifest 中的 `artifact_uri` 和 `checksum`。
 
 ## Domain Crate 10 问
 
@@ -51,15 +31,15 @@ cargo run -p burncloud-supply-model --example phase_three -- --model qwen2.5:1.5
 2. **Responsibility** — read/write the `model_capabilities` capability projection
    (`ModelCapabilityModel::{get, upsert}`); define the manifest and variant value types
    (`ModelManifest`, `Variant`) and the resolver contract with its implementations (`ModelResolver`,
-   `RealModelResolver`, `FakeModelResolver`); filter variants by RAM/VRAM, runtime backend and disk;
-   and provide HuggingFace model-list discovery plus data-directory configuration.
+   `RealModelResolver`, `FakeModelResolver`); filter variants by RAM/VRAM and runtime backend; and
+   provide HuggingFace discovery plus download/data-directory URL helpers.
    **Not responsible for**: canonical pricing and cost calculation (Commerce — `input_price` /
    `output_price` are only a legacy projection in this mixed historical table, not a second pricing
    truth); the `sys_settings` rows behind the `huggingface` / `dir_data` keys (Platform setting);
    `model_capabilities` DDL and migrations (Platform storage database); HuggingFace repository
    metadata CRUD (the no-op facade was removed by #621); Traffic routing and router logs; artifact
-   download execution and on-disk data layout; runtime process lifecycle and hardware probing
-   (Platform node runtime).
+   download execution and on-disk data layout (`burncloud-download` is reachable only from
+   `examples/`); runtime process lifecycle and hardware probing (Platform node runtime).
 
 3. **Data Truth** — one table, `model_capabilities`, created by the Platform versioned migrations:
    `id`, `model` (`NOT NULL UNIQUE`), `context_window`, `max_output_tokens`, `supports_vision`,
@@ -79,22 +59,16 @@ cargo run -p burncloud-supply-model --example phase_three -- --model qwen2.5:1.5
    - resolution: `ModelManifest`, `Variant`, `ModelResolutionRequest`, `ResolvedModel`,
      `ModelResolutionOutcome` (`Local` / `Unsupported`), `LocalModelUnsupported`,
      `LocalModelUnsupportedReason`, `ModelResolutionError`, the `ModelResolver` trait,
-     `RealModelResolver`, `FakeModelResolver`, `ResolvedModelCandidate`,
-     `CandidateResolutionOutcome`;
-   - HuggingFace/configuration: `ModelService`, `HfApiModel`, `get_huggingface_host`,
-     `get_data_dir`;
-   - Manifest loading: `load_default_manifests` loads the static JSON from
-     `crates/supply/model/data/model_manifests.json`; `parse_manifests` parses external JSON
-     supplied through `phase_three --manifest`.
+     `RealModelResolver`, `FakeModelResolver`;
+   - HuggingFace: `ModelService`, `HfApiModel`, `HfFileItem`, `get_huggingface_host`,
+     `get_model_files`, `filter_gguf_files`, `get_data_dir`, `build_download_url`.
    `RealModelResolver` is the manifest-backed foundation and its `ModelResolver::resolve` currently
    returns `ModelResolutionError::ResolutionFailed(...)`; `FakeModelResolver` is the deterministic
-   placeholder used by the Node skeleton. 阶段三候选列表中的 `model_name` 直接来自
-   `ModelManifest.model_name`，`variant_id` 直接来自 `Variant.id`；两者用于区分模型和同一模型
-   的不同量化或 Runtime Variant，不读取前端 marketplace 运营目录的展示名称。
+   placeholder used by the Node skeleton.
 
 5. **Allowed dependencies** — `burncloud-database`, `burncloud-service-setting` (`SettingService`),
    `burncloud-service-ip` (CN HuggingFace mirror selection), `burncloud-node-runtime`
-   (`HardwareProfile`), plus `sqlx`, `tokio`, `serde`,
+   (`HardwareProfile`), `burncloud-download` (only from `examples/`), plus `sqlx`, `tokio`, `serde`,
    `serde_json`, `reqwest`, `async-trait` and `thiserror`. No Commerce, Traffic, Identity or
    Interfaces package appears. `deny.toml` denies routing through `burncloud-common`, so new code
    must depend on the owning crate directly.
@@ -114,15 +88,14 @@ cargo run -p burncloud-supply-model --example phase_three -- --model qwen2.5:1.5
 
    ```text
    src/
-   ├── lib.rs                 HuggingFace discovery, data-dir configuration, re-exports
+   ├── lib.rs                 HuggingFace discovery, download/data-dir helpers, re-exports
    ├── model_capability.rs    ModelCapability/Input/Model, private row mapping, all SQL
    ├── manifest.rs            ModelManifest, Variant
    ├── resolver.rs            ModelResolver contract, DTOs, FakeModelResolver
-   ├── real_model_resolver.rs RealModelResolver, hardware/runtime/disk filters
+   ├── real_model_resolver.rs RealModelResolver, hardware/runtime filters
    └── common.rs              current_timestamp (re-exported)
-   data/model_manifests.json  阶段三默认 Manifest 清单
-   tests/    model_capability.rs (SQLite), manifest.rs, resolver.rs, real_model_resolver.rs
-   examples/ fetch_huggingface.rs, phase_three.rs
+   tests/    model_capability.rs (SQLite), resolver.rs
+   examples/ ten HuggingFace discovery/download examples
    docs/     json.md, database-design.md, legacy owner READMEs
    ```
 
@@ -142,11 +115,9 @@ cargo run -p burncloud-supply-model --example phase_three -- --model qwen2.5:1.5
      `sqlite:///…` database through `create_database_with_url` (which runs the Platform migrations),
      so it round-trips every capability field against the real table, including `synced_at` and the
      legacy price projections. This is the only test touching the real table.
-   - `tests/resolver.rs::fake_resolver_returns_runtime_and_artifact_choice`, plus tests in
-     `tests/manifest.rs`, `tests/resolver.rs` and `tests/real_model_resolver.rs` (hardware, Runtime
-     and disk filtering, with Manifest model and Variant identifiers preserved in candidates).
-   - The shared default Manifest contains no machine-specific `file:///` URI; local records can
-     be supplied through an external `--manifest` file.
+   - `tests/resolver.rs::fake_resolver_returns_runtime_and_artifact_choice`, plus unit tests in
+     `src/manifest.rs`, `src/resolver.rs` and `src/real_model_resolver.rs` (hardware and runtime
+     filtering).
    - Downstream contract proof: `crates/platform/node/tests/golden_path.rs`,
      `crates/interfaces/server/tests/node_framework_e2e.rs` and
      `node_route_visibility_lifecycle.rs`.
@@ -160,9 +131,8 @@ cargo run -p burncloud-supply-model --example phase_three -- --model qwen2.5:1.5
 
     ```text
     Correct:   Consumer        -> ModelResolver (ModelResolutionRequest -> ModelResolutionOutcome)
-    Correct:   Consumer        -> RealModelResolver::resolve_with_capabilities -> CandidateResolutionOutcome
     Correct:   Traffic price sync -> ModelCapabilityModel::upsert(&db, &ModelCapabilityInput { .. })
-    Correct:   Consumer        -> ModelService / get_data_dir
+    Correct:   Consumer        -> ModelService / get_model_files / build_download_url / get_data_dir
     Incorrect: Any crate       -> raw SELECT/INSERT/UPDATE on model_capabilities
     Incorrect: Any crate       -> treat model_capabilities.input_price/output_price as pricing truth
     Incorrect: Any crate       -> expect ModelService to persist HuggingFace metadata (removed by #621)

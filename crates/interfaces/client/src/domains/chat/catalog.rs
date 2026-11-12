@@ -1,11 +1,11 @@
 //! 主服务模型选择 HTTP 边界；保留独立的工件下载与校验能力。
 
 use super::model::{
-    ChatError, ErrorKind, InitializationRequest, ModelVariant, Operation, PreparationEvent,
-    PreparationStage,
+    valid_digest, ChatError, ErrorKind, Gpu, Hardware, InitializationRequest, ModelResolution,
+    ModelVariant, Operation, Platform, PreparationEvent, PreparationStage,
 };
 use reqwest::{Client, Url};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -51,6 +51,72 @@ pub(super) struct CatalogVersion {
     pub(super) revision: String,
     pub(super) source: String,
     pub(super) resource_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResolveEnvelope {
+    success: bool,
+    data: Option<ResolveData>,
+    error: Option<RemoteHardwareError>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ResolveData {
+    status: String,
+    model: String,
+    hardware: RemoteHardwareSnapshot,
+    candidates: Vec<RemoteModelCandidate>,
+    reason: Option<RemoteResolveReason>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteModelCandidate {
+    model_name: String,
+    variant_id: String,
+    quantization: String,
+    min_ram_bytes: u64,
+    min_vram_bytes: u64,
+    disk_size_bytes: u64,
+    runtime: String,
+    artifact_uri: String,
+    checksum: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteResolveReason {
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HardwareEnvelope {
+    success: bool,
+    data: Option<RemoteHardwareSnapshot>,
+    error: Option<RemoteHardwareError>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteHardwareSnapshot {
+    platform: String,
+    #[serde(rename = "arch")]
+    _arch: String,
+    cpu: String,
+    memory_bytes: u64,
+    disk_available_bytes: u64,
+    accelerators: Vec<RemoteAccelerator>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteAccelerator {
+    kind: String,
+    name: String,
+    memory_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteHardwareError {
+    code: String,
+    message: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -286,7 +352,180 @@ impl CatalogClient {
         Ok((Some(version), result.status))
     }
 
+    /// 在一次主服务请求中获取硬件快照和全部兼容 Variant。
+    pub(super) async fn resolve_model(
+        &self,
+        selection: &CatalogSelection,
+    ) -> Result<ModelResolution, ChatError> {
+        selection.version.validate()?;
+        let model = selection.version.model.as_str();
+        let url = self
+            .base
+            .join("/api/node/models/resolve")
+            .map_err(|error| {
+                failure(
+                    ErrorKind::InvalidParameter,
+                    Operation::Resolve,
+                    error.to_string(),
+                )
+            })?;
+        let response = self
+            .client
+            .post(url)
+            .header("Accept", "application/json")
+            .json(&ResolveModelRequest {
+                model: selection.version.model.clone(),
+                source: selection.version.source.clone(),
+                revision: selection.version.revision.clone(),
+            })
+            .send()
+            .await
+            .map_err(|error| transport(error, Operation::Resolve))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, Operation::Resolve))?;
+        let envelope: ResolveEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                format!("模型解析接口响应格式无效：{error}"),
+            )
+        })?;
+        if !status.is_success() || !envelope.success {
+            let error = envelope.error.ok_or_else(|| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Resolve,
+                    "模型解析失败响应缺少错误信息".into(),
+                )
+            })?;
+            return Err(remote_error(error, Operation::Resolve));
+        }
+        let data = envelope.data.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析成功响应缺少数据".into(),
+            )
+        })?;
+        if data.model != model || !matches!(data.status.as_str(), "resolved" | "unsupported") {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析响应与请求不一致".into(),
+            ));
+        }
+        let hardware = data.hardware.into_hardware()?;
+        let model_name = data.model.clone();
+        let variants = data
+            .candidates
+            .into_iter()
+            .map(|candidate| {
+                if candidate.model_name != model_name {
+                    return Err(failure(
+                        ErrorKind::InvalidResult,
+                        Operation::Resolve,
+                        "模型解析候选版本与请求模型不一致".into(),
+                    ));
+                }
+                candidate.into_variant()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reason = data
+            .reason
+            .map(|reason| format!("{}: {}", reason.code, reason.message));
+        if data.status == "resolved" && variants.is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析成功响应没有候选版本".into(),
+            ));
+        }
+        if data.status == "resolved" && reason.is_some() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析成功响应包含不支持原因".into(),
+            ));
+        }
+        if data.status == "unsupported" && !variants.is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析不支持响应包含候选版本".into(),
+            ));
+        }
+        if data.status == "unsupported" && reason.is_none() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析不支持响应缺少原因".into(),
+            ));
+        }
+        Ok(ModelResolution {
+            hardware,
+            variants,
+            reason,
+        })
+    }
+
+    /// 获取主服务 Node 的一次性硬件快照。
+    pub(super) async fn inspect_hardware(&self) -> Result<Hardware, ChatError> {
+        let response = self
+            .request_raw("/api/node/hardware", &[], Operation::Hardware)
+            .await?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, Operation::Hardware))?;
+        let response: HardwareEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                Operation::Hardware,
+                format!("硬件接口响应格式无效：{error}"),
+            )
+        })?;
+        if !status.is_success() || !response.success {
+            let error = response.error.ok_or_else(|| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Hardware,
+                    "硬件接口失败响应缺少错误信息".into(),
+                )
+            })?;
+            return Err(failure(
+                ErrorKind::ExecutionFailed,
+                Operation::Hardware,
+                format!("{}: {}", error.code, error.message),
+            ));
+        }
+
+        let snapshot = response.data.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                Operation::Hardware,
+                "硬件接口成功响应缺少数据".into(),
+            )
+        })?;
+        snapshot.into_hardware()
+    }
+
     async fn request(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        operation: Operation,
+    ) -> Result<reqwest::Response, ChatError> {
+        self.request_raw(path, query, operation)
+            .await?
+            .error_for_status()
+            .map_err(|error| transport(error, operation))
+    }
+
+    async fn request_raw(
         &self,
         path: &str,
         query: &[(&str, String)],
@@ -302,10 +541,8 @@ impl CatalogClient {
             .header("Accept", "application/json, application/x-ndjson")
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status)
             .map_err(|error| transport(error, operation))
     }
-
     async fn get<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -320,6 +557,105 @@ impl CatalogClient {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ResolveModelRequest {
+    model: String,
+    source: String,
+    revision: String,
+}
+
+impl RemoteHardwareSnapshot {
+    fn into_hardware(self) -> Result<Hardware, ChatError> {
+        let platform = match self.platform.as_str() {
+            "linux" => Some(Platform::Linux),
+            "macos" => Some(Platform::MacOs),
+            "windows" => Some(Platform::Windows),
+            "other" => Some(Platform::Other),
+            _ => {
+                return Err(failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Hardware,
+                    "硬件接口返回了未知平台".into(),
+                ));
+            }
+        };
+        if self.cpu.trim().is_empty() || self._arch.trim().is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Hardware,
+                "硬件接口返回了空的平台或 CPU 信息".into(),
+            ));
+        }
+
+        let gpus = self
+            .accelerators
+            .into_iter()
+            .map(RemoteAccelerator::into_gpu)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Hardware {
+            platform,
+            cpu: Some(self.cpu),
+            gpus: Some(gpus),
+            ram_bytes: Some(self.memory_bytes),
+            disk_bytes: Some(self.disk_available_bytes),
+        })
+    }
+}
+
+impl RemoteModelCandidate {
+    fn into_variant(self) -> Result<ModelVariant, ChatError> {
+        if self.model_name.trim().is_empty()
+            || self.variant_id.trim().is_empty()
+            || self.quantization.trim().is_empty()
+            || self.runtime.trim().is_empty()
+            || self.artifact_uri.trim().is_empty()
+            || !valid_digest(&self.checksum)
+        {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析返回了无效候选版本".into(),
+            ));
+        }
+        Ok(ModelVariant {
+            id: self.variant_id,
+            quantization: self.quantization,
+            runtime: self.runtime,
+            artifact_source: self.artifact_uri,
+            expected_sha256: self.checksum,
+            ram_bytes: self.min_ram_bytes,
+            vram_bytes: self.min_vram_bytes,
+            disk_bytes: self.disk_size_bytes,
+        })
+    }
+}
+
+impl RemoteAccelerator {
+    fn into_gpu(self) -> Result<Gpu, ChatError> {
+        let kind = match self.kind.as_str() {
+            "nvidia" | "amd" | "intel" | "apple" | "other" => self.kind,
+            _ => {
+                return Err(failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Hardware,
+                    "硬件接口返回了未知加速器类型".into(),
+                ));
+            }
+        };
+        if self.name.trim().is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Hardware,
+                "硬件接口返回了空加速器名称".into(),
+            ));
+        }
+        Ok(Gpu {
+            name: format!("{kind}: {}", self.name),
+            available_bytes: self.memory_bytes,
+        })
+    }
+}
+
 fn server_base(host: &str, port: u16) -> String {
     let host = match host {
         "0.0.0.0" => "127.0.0.1".to_string(),
@@ -328,6 +664,22 @@ fn server_base(host: &str, port: u16) -> String {
         value => value.to_string(),
     };
     format!("http://{host}:{port}")
+}
+
+fn remote_error(error: RemoteHardwareError, operation: Operation) -> ChatError {
+    let kind = match error.code.as_str() {
+        "invalid_model" => ErrorKind::InvalidParameter,
+        "model_repository_not_found" => ErrorKind::NotFound,
+        "model_repository_unavailable" => ErrorKind::Timeout,
+        "unsupported_platform" | "hardware_probe_failed" => ErrorKind::ExecutionFailed,
+        "manifest_invalid" | "model_resolution_failed" => ErrorKind::InvalidResult,
+        _ => ErrorKind::InvalidResult,
+    };
+    failure(
+        kind,
+        operation,
+        format!("{}: {}", error.code, error.message),
+    )
 }
 
 fn invalid_search(reason: &str) -> ChatError {
