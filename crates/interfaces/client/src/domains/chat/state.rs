@@ -4,8 +4,8 @@ use super::catalog::{CatalogSelection, VersionStatus};
 use super::model::{
     valid_digest, ChatConversation, ChatError, ChatMessage, ChatModel, ErrorKind, GenerationEvent,
     GenerationRequest, Hardware, HardwareEvent, HistoryMessage, InferenceMetrics,
-    InitializationRequest, MessageRole, ModelVariant, Operation, Preparation, PreparationEvent,
-    PreparationStage, PreparedModel,
+    InitializationRequest, MessageRole, ModelResolution, ModelVariant, Operation, Preparation,
+    PreparationEvent, PreparationStage, PreparedModel,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -586,6 +586,31 @@ impl ChatState {
         true
     }
 
+    /// 返回当前任务应提交给 Manifest 解析接口的模型标识。
+    pub(super) fn resolution_model(&self, run_id: u64) -> Option<String> {
+        let preparation = self.preparation()?;
+        if preparation.run_id != run_id || preparation.stage != PreparationStage::Detecting {
+            return None;
+        }
+        Some(
+            preparation
+                .model
+                .catalog_selection
+                .as_ref()
+                .map(|selection| selection.version.model.clone())
+                .unwrap_or_else(|| preparation.model.id.clone()),
+        )
+    }
+
+    /// 返回当前任务确认的外部仓库选择；解析接口必须使用完整仓库身份。
+    pub(super) fn resolution_selection(&self, run_id: u64) -> Option<CatalogSelection> {
+        let preparation = self.preparation()?;
+        if preparation.run_id != run_id || preparation.stage != PreparationStage::Detecting {
+            return None;
+        }
+        preparation.model.catalog_selection.clone()
+    }
+
     /// 接收已完成硬件项；重复项无副作用，矛盾回调结束当前任务。
     pub(super) fn hardware_event(&mut self, run_id: u64, event: HardwareEvent) {
         let Some(p) = self.preparation_mut() else {
@@ -667,6 +692,78 @@ impl ChatState {
             });
         }
     }
+    /// 接收服务端一次性硬件检测和模型解析结果。
+    pub(super) fn finish_model_resolution(
+        &mut self,
+        run_id: u64,
+        result: Result<ModelResolution, ChatError>,
+    ) {
+        let resolution = match result {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                self.fail_preparation(error);
+                return;
+            }
+        };
+        let reason = resolution.reason.clone();
+        let hardware = resolution.hardware.clone();
+        let candidates = resolution.variants;
+        let has_candidates = !candidates.is_empty();
+        let Some(preparation) = self.preparation_mut() else {
+            return;
+        };
+        if preparation.run_id != run_id || preparation.stage != PreparationStage::Detecting {
+            return;
+        }
+        let consistent = preparation.hardware_events.iter().all(|event| match event {
+            HardwareEvent::Cpu(cpu) => hardware.cpu.as_ref() == Some(cpu),
+            HardwareEvent::Gpus(gpus) => hardware.gpus.as_ref() == Some(gpus),
+            HardwareEvent::Memory(bytes) => hardware.ram_bytes == *bytes,
+            HardwareEvent::Disk(bytes) => hardware.disk_bytes == *bytes,
+        });
+        if !consistent {
+            self.invalid_preparation("硬件返回值与已完成检测项矛盾");
+            return;
+        }
+        preparation.hardware = hardware.clone();
+        if has_candidates {
+            preparation.model.variants = candidates;
+        }
+        if let Some(reason) = reason {
+            self.fail_preparation(ChatError {
+                kind: ErrorKind::InsufficientResources,
+                operation: Operation::Resolve,
+                reason,
+            });
+            return;
+        }
+        let use_local_variants = !has_candidates && preparation.model.catalog_selection.is_none();
+        if use_local_variants {
+            self.finish_hardware(run_id, Ok(hardware));
+            return;
+        }
+        if !has_candidates {
+            let (kind, reason) = if preparation.model.catalog_selection.is_some() {
+                (
+                    ErrorKind::NotConnected,
+                    "尚未接入该仓库版本的工件解析与部署".into(),
+                )
+            } else {
+                (
+                    ErrorKind::InvalidResult,
+                    "模型解析接口没有返回兼容版本".into(),
+                )
+            };
+            self.fail_preparation(ChatError {
+                kind,
+                operation: Operation::Resolve,
+                reason,
+            });
+            return;
+        }
+        preparation.stage = PreparationStage::SelectingVariant;
+    }
+
     /// 用户明确选中版本后才提供初始化输入快照。
     pub(super) fn initialization_request(&self, run_id: u64) -> Option<InitializationRequest> {
         let p = self.preparation()?;

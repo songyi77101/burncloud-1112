@@ -10,7 +10,9 @@ use axum::{http::StatusCode, middleware, response::IntoResponse, routing::get, R
 pub mod auth;
 pub mod billing;
 pub mod channel;
+mod hardware;
 pub mod log;
+mod model_resolution;
 pub mod monitor;
 #[expect(
     clippy::allow_attributes_without_reason,
@@ -32,6 +34,8 @@ pub fn routes(state: AppState) -> Router {
     // Public routes - no authentication required.
     let public_routes = Router::new()
         .merge(auth::public_routes())
+        .merge(hardware::routes())
+        .merge(model_resolution::routes())
         .with_state(state.clone());
 
     // Administrator-only management surfaces. Authentication runs on the

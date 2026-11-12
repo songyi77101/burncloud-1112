@@ -434,6 +434,148 @@ fn generate_paths() -> serde_json::Value {
                     }
                 }
             }
+        },
+        "/api/node/hardware": {
+            "get": {
+                "tags": ["Node"],
+                "summary": "Get the server hardware snapshot",
+                "description": "Read the current Node host CPU, physical memory, filesystem capacity and detected accelerators. GPU driver failures degrade to an empty or partial accelerator list.",
+                "operationId": "getNodeHardware",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Hardware snapshot",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HardwareResponse"}
+                            }
+                        }
+                    },
+                    "501": {
+                        "description": "The current platform has no hardware probe implementation",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HardwareErrorResponse"}
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "The common hardware facts could not be read",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HardwareErrorResponse"}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/node/models/resolve": {
+            "post": {
+                "tags": ["Node"],
+                "summary": "Resolve model variants against the server hardware",
+                "description": "Discover GGUF artifacts for the selected external repository model, probe the current Node host and return every compatible model variant. The client must provide the selected model, source and revision.",
+                "operationId": "resolveNodeModel",
+                "security": [],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/ResolveModelRequest"}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Model resolution completed, including the normal unsupported outcome",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ResolveModelResponse"}
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "The model request is invalid",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelResolutionErrorResponse"}
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "The selected external model repository or revision was not found",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelResolutionErrorResponse"}
+                            }
+                        }
+                    },
+                    "501": {
+                        "description": "The current platform has no hardware probe implementation",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelResolutionErrorResponse"}
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "External artifact discovery, hardware probing or model resolution failed",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelResolutionErrorResponse"}
+                            }
+                        }
+                    }
+                }
+            }
         }
     })
 }
@@ -479,6 +621,137 @@ fn generate_schemas() -> serde_json::Value {
             "properties": {
                 "success": {"type": "boolean", "example": false},
                 "message": {"type": "string"}
+            }
+        },
+        "HardwareResponse": {
+            "type": "object",
+            "required": ["success", "data"],
+            "properties": {
+                "success": {"type": "boolean", "example": true},
+                "data": {"$ref": "#/components/schemas/HardwareSnapshot"}
+            }
+        },
+        "HardwareSnapshot": {
+            "type": "object",
+            "required": ["platform", "arch", "cpu", "memory_bytes", "disk_available_bytes", "accelerators"],
+            "properties": {
+                "platform": {"type": "string", "enum": ["linux", "macos", "windows", "other"]},
+                "arch": {"type": "string", "example": "x86_64"},
+                "cpu": {"type": "string", "example": "AMD Ryzen 9 7950X"},
+                "memory_bytes": {"type": "integer", "format": "uint64", "description": "Total physical memory in bytes"},
+                "disk_available_bytes": {"type": "integer", "format": "uint64", "description": "Available bytes on the filesystem containing the server working directory"},
+                "accelerators": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/AcceleratorSnapshot"}
+                }
+            }
+        },
+        "AcceleratorSnapshot": {
+            "type": "object",
+            "required": ["kind", "name", "memory_bytes"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["nvidia", "amd", "intel", "apple", "other"]},
+                "name": {"type": "string"},
+                "memory_bytes": {"type": "integer", "format": "uint64", "nullable": true, "description": "Accelerator memory capacity in bytes; null means unknown"}
+            }
+        },
+        "HardwareErrorResponse": {
+            "type": "object",
+            "required": ["success", "error"],
+            "properties": {
+                "success": {"type": "boolean", "example": false},
+                "error": {
+                    "type": "object",
+                    "required": ["code", "message"],
+                    "properties": {
+                        "code": {"type": "string", "enum": ["unsupported_platform", "hardware_probe_failed"]},
+                        "message": {"type": "string"}
+                    }
+                }
+            }
+        },
+        "ResolveModelRequest": {
+            "type": "object",
+            "required": ["model", "source", "revision"],
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "minLength": 3,
+                    "description": "External repository identity in owner/name form.",
+                    "example": "Qwen/Qwen3-8B"
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["modelscope", "hf-mirror", "huggingface"],
+                    "description": "Repository selected by the model catalog.",
+                    "example": "modelscope"
+                },
+                "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Repository branch, tag or revision selected by the catalog.",
+                    "example": "master"
+                }
+            }
+        },
+        "ResolveModelResponse": {
+            "type": "object",
+            "required": ["success", "data"],
+            "properties": {
+                "success": {"type": "boolean", "example": true},
+                "data": {"$ref": "#/components/schemas/ResolveModelData"}
+            }
+        },
+        "ResolveModelData": {
+            "type": "object",
+            "required": ["status", "model", "hardware", "candidates"],
+            "properties": {
+                "status": {"type": "string", "enum": ["resolved", "unsupported"]},
+                "model": {"type": "string", "example": "Qwen/Qwen3-8B"},
+                "hardware": {"$ref": "#/components/schemas/HardwareSnapshot"},
+                "candidates": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ModelCandidate"}
+                },
+                "reason": {"$ref": "#/components/schemas/ResolveReason"}
+            }
+        },
+        "ModelCandidate": {
+            "type": "object",
+            "required": ["model_name", "variant_id", "quantization", "min_ram_bytes", "min_vram_bytes", "disk_size_bytes", "runtime", "artifact_uri", "checksum"],
+            "properties": {
+                "model_name": {"type": "string"},
+                "variant_id": {"type": "string"},
+                "quantization": {"type": "string"},
+                "min_ram_bytes": {"type": "integer", "format": "uint64"},
+                "min_vram_bytes": {"type": "integer", "format": "uint64"},
+                "disk_size_bytes": {"type": "integer", "format": "uint64"},
+                "runtime": {"type": "string", "example": "llama.cpp"},
+                "artifact_uri": {"type": "string", "format": "uri"},
+                "checksum": {"type": "string", "example": "sha256:..."}
+            }
+        },
+        "ResolveReason": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+                "code": {"type": "string", "enum": ["no_compatible_variant"]},
+                "message": {"type": "string"}
+            }
+        },
+        "ModelResolutionErrorResponse": {
+            "type": "object",
+            "required": ["success", "error"],
+            "properties": {
+                "success": {"type": "boolean", "example": false},
+                "error": {
+                    "type": "object",
+                    "required": ["code", "message"],
+                    "properties": {
+                        "code": {"type": "string", "enum": ["invalid_model", "model_repository_not_found", "model_repository_unavailable", "unsupported_platform", "hardware_probe_failed", "manifest_invalid", "model_resolution_failed"]},
+                        "message": {"type": "string"}
+                    }
+                }
             }
         },
         "ChannelRequest": {
@@ -610,6 +883,10 @@ fn generate_schemas() -> serde_json::Value {
         }
     })
 }
+
+#[cfg(test)]
+#[path = "openapi_tests.rs"]
+mod tests;
 
 /// Handler for OpenAPI JSON endpoint
 async fn openapi_json() -> impl IntoResponse {
