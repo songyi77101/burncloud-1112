@@ -101,6 +101,25 @@ pub(super) async fn normalize_download_dir(dir: &str) -> Result<PathBuf> {
             "目录解析后超出可执行文件同级 models 子目录".to_string(),
         ));
     }
+
+    #[cfg(windows)]
+    let candidate = {
+        // Windows 的 canonicalize 可能返回扩展长度路径；此处只转换已完成安全校验的结果。
+        let candidate = match candidate.strip_prefix(r"\\?\") {
+            Ok(path) => match path.strip_prefix(r"UNC\") {
+                Ok(path) => PathBuf::from(r"\\").join(path),
+                Err(_) => path.to_path_buf(),
+            },
+            Err(_) => candidate,
+        };
+        if candidate.strip_prefix(r"\\?\").is_ok() {
+            return Err(DownloadError::InvalidDirectory(
+                "Windows 路径格式转换失败".to_string(),
+            ));
+        }
+        candidate
+    };
+
     Ok(candidate)
 }
 
