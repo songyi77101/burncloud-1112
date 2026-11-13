@@ -818,8 +818,9 @@ impl ChatState {
                 path,
             } if p.stage == PreparationStage::Verifying => {
                 if !valid_digest(expected)
-                    || expected != actual
-                    || p.variant().is_none_or(|v| v.expected_sha256 != *expected)
+                    || !expected.eq_ignore_ascii_case(actual)
+                    || p.variant()
+                        .is_none_or(|v| !v.expected_sha256.eq_ignore_ascii_case(expected))
                     || path.trim().is_empty()
                     || path.contains('\0')
                 {
@@ -832,7 +833,11 @@ impl ChatState {
                 }
                 p.actual_digest = Some(actual.clone());
                 p.local_path = Some(path.clone());
-                p.stage = PreparationStage::LoadingPackage;
+                p.stage = if p.model.catalog_selection.is_some() {
+                    PreparationStage::ArtifactReady
+                } else {
+                    PreparationStage::LoadingPackage
+                };
                 true
             }
             PreparationEvent::PackageLoaded if p.stage == PreparationStage::LoadingPackage => {
@@ -861,14 +866,17 @@ impl ChatState {
             self.invalid_preparation("接口事件跳过必要阶段或下载进度异常");
         }
     }
-    /// 最终返回值与全部阶段凭据一致才能记录就绪并续聊一次。
+    /// 最终返回值与全部阶段凭据一致才能记录就绪；目录模型只停在文件已就绪。
     pub(super) fn finish_preparation(
         &mut self,
         run_id: u64,
         result: Result<PreparedModel, ChatError>,
     ) -> Option<GenerationPlan> {
+        let stage = self.preparation()?.stage;
         let p = self.preparation_mut()?;
-        if p.run_id != run_id || !p.stage.is_running() {
+        if p.run_id != run_id
+            || (!p.stage.is_running() && p.stage != PreparationStage::ArtifactReady)
+        {
             return None;
         }
         let ready = match result {
@@ -878,15 +886,34 @@ impl ChatState {
                 return None;
             }
         };
-        if p.stage != PreparationStage::Reporting
-            || !p.events.contains(&PreparationEvent::Reported)
-            || !ready.is_valid()
-            || ready.model != p.model
-            || Some(&ready.variant) != p.variant()
-            || p.actual_digest.as_ref() != Some(&ready.actual_sha256)
-            || p.local_path.as_ref() != Some(&ready.local_path)
-        {
+        let is_catalog_model = p.model.catalog_selection.is_some();
+        let valid = if is_catalog_model {
+            stage == PreparationStage::ArtifactReady
+                && p.stage == PreparationStage::ArtifactReady
+                && ready.is_valid()
+                && ready.model == p.model
+                && Some(&ready.variant) == p.variant()
+                && p.actual_digest
+                    .as_ref()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(&ready.actual_sha256))
+                && p.local_path.as_ref() == Some(&ready.local_path)
+        } else {
+            p.stage == PreparationStage::Reporting
+                && p.events.contains(&PreparationEvent::Reported)
+                && ready.is_valid()
+                && ready.model == p.model
+                && Some(&ready.variant) == p.variant()
+                && p.actual_digest
+                    .as_ref()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(&ready.actual_sha256))
+                && p.local_path.as_ref() == Some(&ready.local_path)
+        };
+        if !valid {
             self.invalid_preparation("接口提前成功或返回了不匹配的版本、摘要、路径");
+            return None;
+        }
+        if is_catalog_model {
+            self.restore_pending_draft();
             return None;
         }
         p.stage = PreparationStage::Ready;

@@ -2,7 +2,6 @@
 
 use super::{
     backend::{ChatBackend, HttpBackend},
-    catalog,
     model::{
         gib, resource_label, ChatMessage, ChatModel, HardwareEvent, MessageRole, Preparation,
         PreparationStage,
@@ -44,8 +43,8 @@ const LIVEVIEW_ENTER_PREVENT_DEFAULT: &str =
 /// # Notes
 ///
 /// `/` 和 `/home` 使用同一组件。目录来自主服务的模型选择接口，与网关共用监听端口。
-/// 硬件检测通过公开的 `/api/node/hardware` 获取 Node 主机快照；当前目录选择只交接仓库快照，缺少工件清单时明确停止。
-/// 底层文件下载与校验能力保留，但正常目录入口不执行真实下载、部署或推理。
+/// 硬件检测与目录工件下载通过公开的 Node 接口完成；目录下载成功只表示文件已校验。
+/// `ArtifactReady` 不代表模型已经部署或可以推理。
 /// 状态只存在于当前客户端会话，目录可访问不代表已部署。
 #[component]
 pub fn ChatHome() -> Element {
@@ -383,7 +382,7 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
             }
             if let Some(selection) = preparation.model.catalog_selection.as_ref() {
                 p { class: "chat-preparation-note", "{selection.name} · {selection.version.source} · {selection.version.model} · {selection.version.revision}" }
-                p { class: "chat-preparation-note", "硬件检测与量化版本解析来自 Node 主服务；当前入口不执行真实下载、校验或部署。" }
+                p { class: "chat-preparation-note", "硬件检测、模型下载和 SHA-256 摘要校验由 Node 服务完成；文件尚未部署。" }
             }
             if !preparation.collapsed {
                 if stage != PreparationStage::AwaitingStart {
@@ -438,16 +437,16 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
                     details { class: "chat-digest",
                         summary { "校验摘要" }
                         p { "来源预期摘要" code { {expected_digest} } }
-                        p { "本地摘要" code { {preparation.actual_digest.as_deref().unwrap_or("等待校验")} } }
+                        p { "Node 实际摘要" code { {preparation.actual_digest.as_deref().unwrap_or("等待校验")} } }
                     }
                 }
                 if let Some(error) = preparation.error.as_ref() {
                     p { class: "chat-preparation-error", role: "alert", "{error}" }
                 }
                 if let Some(path) = preparation.local_path.as_deref() {
-                    p { class: "chat-local-path", "校验成功 · 本地路径" code { {path} } }
+                    p { class: "chat-local-path", "校验成功 · Node 文件路径" code { {path} } }
                 } else if stage == PreparationStage::Failed {
-                    p { class: "chat-preparation-note", "本地路径：空；不会继续后续阶段。" }
+                    p { class: "chat-preparation-note", "Node 文件路径：空；不会继续后续阶段。" }
                 }
             }
             if active {
@@ -769,17 +768,7 @@ fn spawn_preparation(mut state: Signal<ChatState>, run_id: u64) {
             if let Some(request) = request {
                 let callback =
                     move |event| state.with_mut(|value| value.preparation_event(run_id, event));
-                // 目录模型由客户端直接下载并校验；部署未接入，校验通过后以 NotConnected 停止。
-                let result = if request.model.catalog_selection.is_some() {
-                    match catalog::download_root() {
-                        Ok(root) => catalog::download(&root, &request, callback)
-                            .await
-                            .and_then(|path| Err(catalog::deployment_missing(&path))),
-                        Err(error) => Err(error),
-                    }
-                } else {
-                    backend.initialize(request, Box::new(callback)).await
-                };
+                let result = backend.initialize(request, Box::new(callback)).await;
                 if let Some(plan) = state.with_mut(|value| value.finish_preparation(run_id, result))
                 {
                     spawn_stream(state, plan);

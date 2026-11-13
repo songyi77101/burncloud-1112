@@ -576,6 +576,79 @@ fn generate_paths() -> serde_json::Value {
                     }
                 }
             }
+        },
+        "/api/node/models/download": {
+            "post": {
+                "tags": ["Node"],
+                "summary": "Download and verify a selected model artifact",
+                "description": "Download the selected GGUF artifact on the Node host through the persistent download manager and verify its SHA-256 checksum. The operation waits for completion and is idempotent for the same artifact identity.",
+                "operationId": "downloadNodeModel",
+                "security": [],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/DownloadModelRequest"}
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "The artifact was downloaded or reused and verified",
+                        "headers": {
+                            "Cache-Control": {
+                                "description": "The response is not cacheable.",
+                                "schema": {"type": "string", "example": "no-store"}
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/DownloadModelResponse"}
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "The download request or artifact address is invalid",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelDownloadErrorResponse"}
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The downloaded file does not match the requested checksum",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelDownloadErrorResponse"}
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "The downloaded file could not be read or verified",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelDownloadErrorResponse"}
+                            }
+                        }
+                    },
+                    "502": {
+                        "description": "The upstream artifact download failed",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelDownloadErrorResponse"}
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "The download manager could not be initialized",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelDownloadErrorResponse"}
+                            }
+                        }
+                    }
+                }
+            }
         }
     })
 }
@@ -749,6 +822,54 @@ fn generate_schemas() -> serde_json::Value {
                     "required": ["code", "message"],
                     "properties": {
                         "code": {"type": "string", "enum": ["invalid_model", "model_repository_not_found", "model_repository_unavailable", "unsupported_platform", "hardware_probe_failed", "manifest_invalid", "model_resolution_failed"]},
+                        "message": {"type": "string"}
+                    }
+                }
+            }
+        },
+        "DownloadModelRequest": {
+            "type": "object",
+            "required": ["model", "source", "revision", "variant_id", "artifact_uri", "checksum"],
+            "properties": {
+                "model": {"type": "string", "example": "Qwen/Qwen3-8B"},
+                "source": {"type": "string", "enum": ["modelscope", "hf-mirror", "huggingface"]},
+                "revision": {"type": "string", "example": "master"},
+                "variant_id": {"type": "string", "example": "Q4_K_M.gguf"},
+                "artifact_uri": {"type": "string", "format": "uri", "example": "https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/Q4_K_M.gguf"},
+                "checksum": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
+            }
+        },
+        "DownloadModelResponse": {
+            "type": "object",
+            "required": ["success", "data"],
+            "properties": {
+                "success": {"type": "boolean", "example": true},
+                "data": {"$ref": "#/components/schemas/DownloadModelData"}
+            }
+        },
+        "DownloadModelData": {
+            "type": "object",
+            "required": ["status", "model", "source", "revision", "variant_id", "local_path", "actual_sha256"],
+            "properties": {
+                "status": {"type": "string", "enum": ["verified"]},
+                "model": {"type": "string"},
+                "source": {"type": "string", "enum": ["modelscope", "hf-mirror", "huggingface"]},
+                "revision": {"type": "string"},
+                "variant_id": {"type": "string"},
+                "local_path": {"type": "string", "description": "Path on the Node host; it is not a client-local path."},
+                "actual_sha256": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
+            }
+        },
+        "ModelDownloadErrorResponse": {
+            "type": "object",
+            "required": ["success", "error"],
+            "properties": {
+                "success": {"type": "boolean", "example": false},
+                "error": {
+                    "type": "object",
+                    "required": ["code", "message"],
+                    "properties": {
+                        "code": {"type": "string", "enum": ["invalid_download_request", "checksum_mismatch", "download_failed", "download_service_unavailable", "download_storage_failed"]},
                         "message": {"type": "string"}
                     }
                 }
