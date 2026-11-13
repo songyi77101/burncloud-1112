@@ -1,6 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
 use tokio::net::lookup_host;
 use url::Url;
 
@@ -105,14 +110,26 @@ pub(super) async fn normalize_download_dir(dir: &str) -> Result<PathBuf> {
     #[cfg(windows)]
     let candidate = {
         // Windows 的 canonicalize 可能返回扩展长度路径；此处只转换已完成安全校验的结果。
-        let candidate = match candidate.strip_prefix(r"\\?\") {
-            Ok(path) => match path.strip_prefix(r"UNC\") {
-                Ok(path) => PathBuf::from(r"\\").join(path),
-                Err(_) => path.to_path_buf(),
-            },
-            Err(_) => candidate,
+        let extended_prefix: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+        let candidate_units: Vec<u16> = candidate.as_os_str().encode_wide().collect();
+        let candidate = if candidate_units.starts_with(&extended_prefix) {
+            let path_units = &candidate_units[extended_prefix.len()..];
+            let unc_prefix: Vec<u16> = "UNC\\".encode_utf16().collect();
+            let (path_units, mut normal_units) = if path_units.starts_with(&unc_prefix) {
+                (
+                    &path_units[unc_prefix.len()..],
+                    "\\\\".encode_utf16().collect(),
+                )
+            } else {
+                (path_units, Vec::new())
+            };
+            normal_units.extend_from_slice(path_units);
+            PathBuf::from(OsString::from_wide(&normal_units))
+        } else {
+            candidate
         };
-        if candidate.strip_prefix(r"\\?\").is_ok() {
+        let candidate_units: Vec<u16> = candidate.as_os_str().encode_wide().collect();
+        if candidate_units.starts_with(&extended_prefix) {
             return Err(DownloadError::InvalidDirectory(
                 "Windows 路径格式转换失败".to_string(),
             ));
