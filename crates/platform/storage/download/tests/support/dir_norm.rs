@@ -3,7 +3,16 @@
     reason = "测试用 Result 传播文件操作错误，并用断言验证路径行为"
 )]
 
+#[cfg(windows)]
+use std::path::Path;
+
 use super::normalize_download_dir;
+
+#[cfg(windows)]
+fn assert_regular_windows_path(path: &Path) {
+    assert!(path.is_absolute());
+    assert!(!path.to_string_lossy().starts_with(r"\\?\"));
+}
 
 #[tokio::test]
 async fn resolves_download_directories_relative_to_the_executable(
@@ -19,23 +28,50 @@ async fn resolves_download_directories_relative_to_the_executable(
     let outside_dir = executable_dir.join("dir-normalization-outside");
 
     let normalized_models = normalize_download_dir("models").await?;
+    #[cfg(not(windows))]
     assert_eq!(
         normalized_models,
         tokio::fs::canonicalize(&models_dir).await?
     );
+    #[cfg(windows)]
+    {
+        assert_regular_windows_path(&normalized_models);
+        assert_eq!(
+            tokio::fs::canonicalize(&normalized_models).await?,
+            tokio::fs::canonicalize(&models_dir).await?
+        );
+    }
 
     let normalized_nested = normalize_download_dir("models/sub").await?;
+    #[cfg(not(windows))]
     assert_eq!(
         normalized_nested,
         tokio::fs::canonicalize(&nested_dir).await?
     );
+    #[cfg(windows)]
+    {
+        assert_regular_windows_path(&normalized_nested);
+        assert_eq!(
+            tokio::fs::canonicalize(&normalized_nested).await?,
+            tokio::fs::canonicalize(&nested_dir).await?
+        );
+    }
 
     let normalized_absolute =
         normalize_download_dir(unique_dir.to_str().ok_or("测试绝对路径不是有效 UTF-8")?).await?;
+    #[cfg(not(windows))]
     assert_eq!(
         normalized_absolute,
         tokio::fs::canonicalize(&unique_dir).await?
     );
+    #[cfg(windows)]
+    {
+        assert_regular_windows_path(&normalized_absolute);
+        assert_eq!(
+            tokio::fs::canonicalize(&normalized_absolute).await?,
+            tokio::fs::canonicalize(&unique_dir).await?
+        );
+    }
 
     assert!(normalize_download_dir("../x").await.is_err());
     assert!(
