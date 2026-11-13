@@ -153,6 +153,8 @@ pub(super) enum PreparationStage {
     SelectingVariant,
     Downloading,
     Verifying,
+    /// Node 已完成下载和摘要校验，但尚未部署模型。
+    ArtifactReady,
     LoadingPackage,
     Deploying,
     HealthChecking,
@@ -171,6 +173,7 @@ impl PreparationStage {
             Self::SelectingVariant => "模型解析完成，请选择量化版本",
             Self::Downloading => "正在下载模型…",
             Self::Verifying => "下载完成，正在校验摘要…",
+            Self::ArtifactReady => "模型文件已下载并完成校验（尚未部署）",
             Self::LoadingPackage => "正在加载安装包…",
             Self::Deploying => "正在自动部署…",
             Self::HealthChecking => "正在健康检查…",
@@ -267,7 +270,9 @@ impl PreparedModel {
         !self.model.id.trim().is_empty()
             && self.model.variants.contains(&self.variant)
             && valid_digest(&self.variant.expected_sha256)
-            && self.actual_sha256 == self.variant.expected_sha256
+            && self
+                .actual_sha256
+                .eq_ignore_ascii_case(&self.variant.expected_sha256)
             && !self.local_path.trim().is_empty()
             && !self.local_path.contains('\0')
     }

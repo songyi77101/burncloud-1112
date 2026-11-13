@@ -2,8 +2,6 @@
 use super::super::model::ChatModel;
 use super::*;
 use serde_json::json;
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -522,47 +520,75 @@ fn catalog_selection() -> CatalogSelection {
     }
 }
 
-async fn file_server(body: &'static [u8]) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("测试监听");
-    let base = format!("http://{}", listener.local_addr().expect("地址"));
+#[expect(
+    clippy::disallowed_types,
+    reason = "下载接口测试需要在 HTTP 边界构造和解析动态 JSON"
+)]
+async fn download_server(status: u16, body: serde_json::Value) -> Server {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("下载接口监听");
+    let base = format!("http://{}", listener.local_addr().expect("下载接口地址"));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let body = serde_json::to_string(&body).expect("下载接口响应");
     let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("下载接口连接");
+        let mut bytes = Vec::new();
+        let mut content_length = None;
         loop {
-            let (mut stream, _) = listener.accept().await.expect("测试连接");
-            let mut bytes = Vec::new();
-            loop {
-                let mut buffer = [0; 1024];
-                let count = stream.read(&mut buffer).await.expect("读取请求");
-                bytes.extend_from_slice(&buffer[..count]);
-                if count == 0 || bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+            let mut buffer = [0_u8; 1024];
+            let count = stream.read(&mut buffer).await.expect("读取下载请求");
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let header_end = header_end + 4;
+                if content_length.is_none() {
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    content_length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    });
+                }
+                if content_length.is_some_and(|length| bytes.len() >= header_end + length) {
                     break;
                 }
             }
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            if let Err(error) = stream.write_all(head.as_bytes()).await {
-                eprintln!("测试文件连接已关闭：{error}");
-                continue;
-            }
-            if let Err(error) = stream.write_all(body).await {
-                // 超长测试中客户端提前中止，服务端允许写回失败。
-                eprintln!("测试文件连接已关闭：{error}");
-            }
         }
+        seen.lock()
+            .expect("下载请求锁")
+            .push(String::from_utf8(bytes).expect("下载请求文本"));
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("写入下载响应");
     });
-    (base, task)
+    Server {
+        client: CatalogClient::new(&base, Duration::from_secs(2)).expect("测试客户端"),
+        requests,
+        task,
+    }
 }
-fn download_request(url: String, sha256: String, size: u64) -> InitializationRequest {
+
+fn download_request(checksum: &str) -> InitializationRequest {
     let variant = ModelVariant {
-        id: "q4".into(),
+        id: "Q4_K_M.gguf".into(),
         quantization: "Q4_K_M".into(),
         runtime: "llama.cpp".into(),
-        artifact_source: url,
-        expected_sha256: sha256,
+        artifact_source: "https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/Q4_K_M.gguf"
+            .into(),
+        expected_sha256: checksum.into(),
         ram_bytes: 1,
         vram_bytes: 0,
-        disk_bytes: size,
+        disk_bytes: 1,
     };
     let selection = catalog_selection();
     InitializationRequest {
@@ -578,86 +604,148 @@ fn download_request(url: String, sha256: String, size: u64) -> InitializationReq
         variant,
     }
 }
-fn files(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                found.extend(files(&path));
-            } else {
-                found.push(path);
+
+const DOWNLOAD_DIGEST: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_types,
+    reason = "下载接口测试需要检查实际提交的 JSON 字段"
+)]
+async fn download_model_posts_selected_artifact_and_returns_prepared_model() {
+    let service = download_server(
+        200,
+        json!({
+            "success": true,
+            "data": {
+                "status": "verified",
+                "model": "Qwen/Qwen3-8B",
+                "source": "modelscope",
+                "revision": "master",
+                "variant_id": "Q4_K_M.gguf",
+                "local_path": "/node/models/modelscope/Qwen_Qwen3-8B/master/Q4_K_M.gguf",
+                "actual_sha256": DOWNLOAD_DIGEST
             }
-        }
-    }
-    found
-}
-const DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const BODY: &[u8] = b"burncloud-model-bytes";
-fn body_digest() -> String {
-    format!("sha256:{:x}", Sha256::digest(BODY))
-}
-#[tokio::test]
-async fn download_streams_verifies_and_stops_before_deployment() {
-    let (base, task) = file_server(BODY).await;
-    let root = tempfile::tempdir().expect("临时目录");
-    let request = download_request(
-        format!("{base}/files/q4.gguf"),
-        body_digest(),
-        BODY.len() as u64,
-    );
+        }),
+    )
+    .await;
+    let request = download_request(DOWNLOAD_DIGEST);
     let mut events = Vec::new();
-    let path = download(root.path(), &request, |event| events.push(event))
+    let prepared = service
+        .client
+        .download_model(&request, |event| events.push(event))
         .await
-        .expect("下载成功");
-    task.abort();
-    let expected = root
-        .path()
-        .join("modelscope")
-        .join("Qwen_Qwen3-8B")
-        .join("master")
-        .join("q4-q4.gguf");
-    assert_eq!(PathBuf::from(&path), expected);
-    assert_eq!(std::fs::read(&expected).expect("文件"), BODY);
-    assert_eq!(files(root.path()), vec![expected]);
-    assert!(matches!(
-        events.first(),
-        Some(PreparationEvent::DownloadProgress { .. })
-    ));
+        .expect("Node 下载响应成功");
+
+    assert_eq!(prepared.model, request.model);
+    assert_eq!(prepared.variant, request.variant);
+    assert_eq!(prepared.actual_sha256, DOWNLOAD_DIGEST);
     assert_eq!(
-        events.last(),
-        Some(&PreparationEvent::Verified {
-            expected: body_digest(),
-            actual: body_digest(),
-            path: path.clone(),
-        })
+        prepared.local_path,
+        "/node/models/modelscope/Qwen_Qwen3-8B/master/Q4_K_M.gguf"
     );
-    assert_eq!(events[events.len() - 2], PreparationEvent::Downloaded);
-    let stop = deployment_missing(&path);
-    assert_eq!(stop.kind, ErrorKind::NotConnected);
-    assert!(stop.reason.contains("尚未接入部署") && stop.reason.contains(&path));
+    assert_eq!(
+        events,
+        vec![
+            PreparationEvent::DownloadProgress {
+                completed: 0,
+                total: None,
+            },
+            PreparationEvent::Downloaded,
+            PreparationEvent::Verified {
+                expected: DOWNLOAD_DIGEST.into(),
+                actual: DOWNLOAD_DIGEST.into(),
+                path: prepared.local_path.clone(),
+            },
+        ]
+    );
+
+    let raw = service.requests.lock().expect("下载请求").join("");
+    assert!(raw.starts_with("POST /api/node/models/download"));
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .expect("下载请求体");
+    let body: serde_json::Value = serde_json::from_str(body).expect("下载 JSON");
+    assert_eq!(body["model"], "Qwen/Qwen3-8B");
+    assert_eq!(body["source"], "modelscope");
+    assert_eq!(body["revision"], "master");
+    assert_eq!(body["variant_id"], "Q4_K_M.gguf");
+    assert_eq!(
+        body["artifact_uri"],
+        "https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/Q4_K_M.gguf"
+    );
+    assert_eq!(body["checksum"], DOWNLOAD_DIGEST);
 }
+
 #[tokio::test]
-async fn download_rejects_digest_and_size_mismatches_without_leftovers() {
-    let (base, task) = file_server(BODY).await;
-    let len = BODY.len() as u64;
-    let cases = [
-        (DIGEST.to_string(), len),
-        (body_digest(), len - 1),
-        (body_digest(), len + 1),
-    ];
-    for (sha256, size) in cases {
-        let root = tempfile::tempdir().expect("临时目录");
-        let request = download_request(format!("{base}/q4.gguf"), sha256, size);
-        let mut events = Vec::new();
-        let error = download(root.path(), &request, |event| events.push(event))
+async fn download_model_maps_server_errors_to_chat_errors() {
+    for (status, code, kind, operation) in [
+        (
+            422,
+            "checksum_mismatch",
+            ErrorKind::VerificationFailed,
+            Operation::Initialize(PreparationStage::Verifying),
+        ),
+        (
+            502,
+            "download_failed",
+            ErrorKind::ExecutionFailed,
+            Operation::Initialize(PreparationStage::Downloading),
+        ),
+        (
+            503,
+            "download_service_unavailable",
+            ErrorKind::ExecutionFailed,
+            Operation::Initialize(PreparationStage::Downloading),
+        ),
+    ] {
+        let service = download_server(
+            status,
+            json!({
+                "success": false,
+                "error": {"code": code, "message": "测试错误"}
+            }),
+        )
+        .await;
+        let error = service
+            .client
+            .download_model(&download_request(DOWNLOAD_DIGEST), |_| {})
             .await
-            .expect_err("校验失败");
-        assert_eq!(error.kind, ErrorKind::VerificationFailed);
-        assert!(files(root.path()).is_empty(), "不得残留文件");
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, PreparationEvent::Verified { .. })));
+            .expect_err("下载错误应返回 ChatError");
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.operation, operation);
+        assert!(error.reason.contains(code));
     }
-    task.abort();
+}
+
+#[tokio::test]
+async fn download_model_rejects_identity_mismatch_in_success_response() {
+    let service = download_server(
+        200,
+        json!({
+            "success": true,
+            "data": {
+                "status": "verified",
+                "model": "Other/Model",
+                "source": "modelscope",
+                "revision": "master",
+                "variant_id": "Q4_K_M.gguf",
+                "local_path": "/node/models/model.gguf",
+                "actual_sha256": DOWNLOAD_DIGEST
+            }
+        }),
+    )
+    .await;
+    let error = service
+        .client
+        .download_model(&download_request(DOWNLOAD_DIGEST), |_| {})
+        .await
+        .expect_err("不匹配的下载结果必须拒绝");
+    assert_eq!(error.kind, ErrorKind::InvalidResult);
+    assert_eq!(
+        error.operation,
+        Operation::Initialize(PreparationStage::Downloading)
+    );
 }
