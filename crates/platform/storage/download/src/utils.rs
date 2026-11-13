@@ -116,34 +116,8 @@ pub(super) async fn normalize_download_dir(dir: &str) -> Result<PathBuf> {
     }
 
     #[cfg(windows)]
-    let candidate = {
-        // Windows 的 canonicalize 可能返回扩展长度路径；此处只转换已完成安全校验的结果。
-        let extended_prefix: Vec<u16> = "\\\\?\\".encode_utf16().collect();
-        let candidate_units: Vec<u16> = candidate.as_os_str().encode_wide().collect();
-        let candidate = if candidate_units.starts_with(&extended_prefix) {
-            let path_units = &candidate_units[extended_prefix.len()..];
-            let unc_prefix: Vec<u16> = "UNC\\".encode_utf16().collect();
-            let (path_units, mut normal_units) = if path_units.starts_with(&unc_prefix) {
-                (
-                    &path_units[unc_prefix.len()..],
-                    "\\\\".encode_utf16().collect(),
-                )
-            } else {
-                (path_units, Vec::new())
-            };
-            normal_units.extend_from_slice(path_units);
-            PathBuf::from(OsString::from_wide(&normal_units))
-        } else {
-            candidate
-        };
-        let candidate_units: Vec<u16> = candidate.as_os_str().encode_wide().collect();
-        if candidate_units.starts_with(&extended_prefix) {
-            return Err(DownloadError::InvalidDirectory(
-                "Windows 路径格式转换失败".to_string(),
-            ));
-        }
-        candidate
-    };
+    let candidate = to_regular_windows_path(&candidate)
+        .ok_or_else(|| DownloadError::InvalidDirectory("Windows 路径格式转换失败".to_string()))?;
 
     Ok(candidate)
 }
@@ -167,20 +141,86 @@ pub(super) async fn existing_database_file(final_path: &str) -> Result<Option<Pa
 #[cfg(windows)]
 fn to_extended_windows_path(path: &Path) -> PathBuf {
     let path_units: Vec<u16> = path.as_os_str().encode_wide().collect();
-    let extended_prefix: Vec<u16> = "\\\\?\\".encode_utf16().collect();
-    if path_units.starts_with(&extended_prefix) {
-        return path.to_path_buf();
+    let extended_prefix = "\\\\?\\".encode_utf16().collect::<Vec<_>>();
+    let slash_extended_prefix = "//?/".encode_utf16().collect::<Vec<_>>();
+    if path_units.starts_with(&extended_prefix) || path_units.starts_with(&slash_extended_prefix) {
+        return PathBuf::from(OsString::from_wide(&normalize_windows_separators(
+            &path_units,
+        )));
     }
 
-    let unc_prefix: Vec<u16> = "\\\\".encode_utf16().collect();
+    let unc_prefix = "\\\\".encode_utf16().collect::<Vec<_>>();
+    let slash_unc_prefix = "//".encode_utf16().collect::<Vec<_>>();
     let mut extended_units = extended_prefix;
     if path_units.starts_with(&unc_prefix) {
         extended_units.extend("UNC\\".encode_utf16());
-        extended_units.extend_from_slice(&path_units[unc_prefix.len()..]);
+        append_windows_path_units(&mut extended_units, &path_units[unc_prefix.len()..]);
+    } else if path_units.starts_with(&slash_unc_prefix) {
+        extended_units.extend("UNC\\".encode_utf16());
+        append_windows_path_units(&mut extended_units, &path_units[slash_unc_prefix.len()..]);
     } else {
-        extended_units.extend(path_units);
+        append_windows_path_units(&mut extended_units, &path_units);
     }
     PathBuf::from(OsString::from_wide(&extended_units))
+}
+
+#[cfg(windows)]
+fn to_regular_windows_path(path: &Path) -> Option<PathBuf> {
+    let path_units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let extended_prefix = "\\\\?\\".encode_utf16().collect::<Vec<_>>();
+    let slash_extended_prefix = "//?/".encode_utf16().collect::<Vec<_>>();
+    let path_units = if path_units.starts_with(&extended_prefix) {
+        &path_units[extended_prefix.len()..]
+    } else if path_units.starts_with(&slash_extended_prefix) {
+        &path_units[slash_extended_prefix.len()..]
+    } else {
+        return Some(path.to_path_buf());
+    };
+
+    let unc_prefix = "UNC\\".encode_utf16().collect::<Vec<_>>();
+    let slash_unc_prefix = "UNC/".encode_utf16().collect::<Vec<_>>();
+    let (path_units, mut regular_units) = if path_units.starts_with(&unc_prefix) {
+        (
+            &path_units[unc_prefix.len()..],
+            "\\\\".encode_utf16().collect(),
+        )
+    } else if path_units.starts_with(&slash_unc_prefix) {
+        (
+            &path_units[slash_unc_prefix.len()..],
+            "\\\\".encode_utf16().collect(),
+        )
+    } else {
+        (path_units, Vec::new())
+    };
+    append_windows_path_units(&mut regular_units, path_units);
+    let regular_path = PathBuf::from(OsString::from_wide(&regular_units));
+    let regular_units = regular_path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if regular_units.starts_with(&extended_prefix)
+        || regular_units.starts_with(&slash_extended_prefix)
+    {
+        None
+    } else {
+        Some(regular_path)
+    }
+}
+
+#[cfg(windows)]
+fn append_windows_path_units(target: &mut Vec<u16>, source: &[u16]) {
+    target.extend(normalize_windows_separators(source));
+}
+
+#[cfg(windows)]
+fn normalize_windows_separators(path_units: &[u16]) -> Vec<u16> {
+    path_units
+        .iter()
+        .map(|unit| {
+            if *unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                *unit
+            }
+        })
+        .collect()
 }
 async fn ensure_existing_path_inside(root: &Path, candidate: &Path) -> Result<()> {
     let relative = candidate.strip_prefix(root).map_err(|_| {
