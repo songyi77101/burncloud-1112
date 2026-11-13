@@ -29,3 +29,15 @@
 - 针对失败报告中的 Windows 路径表示不一致，补充普通路径分支的分隔符归一化：即使 `canonicalize` 已返回普通 Windows 路径，也转换为统一的反斜杠表示后再交给下载链路。
 - 未改变模型根目录、安全校验、目录创建、canonicalize 顺序及公有接口；扩展长度路径仍在最终边界检查成功后转换。
 - 回流检查：`cargo fmt --all`、`cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`、`cargo test -p burncloud-download --all-targets --offline` 均通过。
+## 回流修复记录（implement，2026-11-14）
+
+- 针对失败报告中的 `T5b`，恢复缺失 GID 时检测 aria2 返回的 GID 是否仍等于数据库旧值；发生复用时移除匹配任务并重新创建，若仍复用则返回可诊断的恢复错误，并保留数据库更新失败时的任务清理。
+- 针对失败报告中的 `T8`、`T9`，完成任务监控对 aria2 返回文件路径增加 Windows 路径规范化、下载目录边界校验、同名目标安全兜底和有限次数的文件系统可见性重试，避免完成事件早于 Windows 文件可见性时误判为失败。
+- 未新增公有接口，未改变 `normalize_aria2_path`、下载 URL 校验、任务去重和数据库字段；修改仅位于下载实现工作区。
+
+### 回流检查结果
+
+- `cargo fmt --all`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`：通过。
+- `cargo test -p burncloud-download --all-targets --offline`：通过，15 项单元测试与 1 项公有接口测试全部通过。
