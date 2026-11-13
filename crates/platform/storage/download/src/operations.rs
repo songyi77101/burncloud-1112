@@ -311,19 +311,22 @@ impl DownloadManager {
                     error = %error,
                     "aria2 中找不到已保存任务，尝试重建"
                 );
-                let outcome = client
-                    .add_uri(
-                        vec![url.clone()],
-                        Some(download_options(&directory_text, &filename)),
-                    )
-                    .await?;
-                gid = outcome.gid().to_string();
+                let (rebuilt_gid, rebuilt_task_created) = Self::rebuild_missing_task(
+                    &client,
+                    &url,
+                    &directory_text,
+                    &filename,
+                    &record.gid,
+                    record.id,
+                )
+                .await?;
+                gid = rebuilt_gid;
                 if let Err(error) = self
                     .db
                     .update_gid_by_id(record.id, &gid, i64::from(retry_count))
                     .await
                 {
-                    if outcome.is_created() {
+                    if rebuilt_task_created {
                         return match client.remove(&gid).await {
                             Ok(_) => Err(error.into()),
                             Err(cleanup) => Err(DownloadError::Compensation {
@@ -362,6 +365,35 @@ impl DownloadManager {
             }
         }
         Ok(())
+    }
+
+    async fn rebuild_missing_task(
+        client: &Aria2RpcClient,
+        url: &str,
+        directory: &str,
+        filename: &str,
+        old_gid: &str,
+        record_id: i64,
+    ) -> Result<(String, bool)> {
+        let options = download_options(directory, filename);
+        let mut outcome = client.add_uri(vec![url.to_string()], Some(options)).await?;
+        if outcome.gid() == old_gid {
+            // aria2 偶尔会把恢复请求匹配到旧 GID；先移除该匹配任务，再重新创建，避免数据库继续指向旧任务。
+            client.remove(outcome.gid()).await?;
+            outcome = client
+                .add_uri(
+                    vec![url.to_string()],
+                    Some(download_options(directory, filename)),
+                )
+                .await?;
+            if outcome.gid() == old_gid {
+                client.remove(outcome.gid()).await?;
+                return Err(invalid_record(format!(
+                    "任务 {record_id} 重建后仍复用了旧 aria2 GID：{old_gid}"
+                )));
+            }
+        }
+        Ok((outcome.gid().to_string(), outcome.is_created()))
     }
 
     fn rpc_client(&self) -> Result<Aria2RpcClient> {
