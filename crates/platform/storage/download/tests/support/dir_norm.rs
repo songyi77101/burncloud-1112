@@ -4,9 +4,35 @@
 )]
 
 #[cfg(windows)]
-use std::path::Path;
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use std::path::{Path, PathBuf};
 
 use super::normalize_download_dir;
+
+#[cfg(windows)]
+fn regular_windows_path(path: &Path) -> PathBuf {
+    let path_units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let extended_prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    if !path_units.starts_with(&extended_prefix) {
+        return path.to_path_buf();
+    }
+
+    let path_units = &path_units[extended_prefix.len()..];
+    let unc_prefix: Vec<u16> = r"UNC\".encode_utf16().collect();
+    let (path_units, mut regular_units) = if path_units.starts_with(&unc_prefix) {
+        (
+            &path_units[unc_prefix.len()..],
+            r"\\".encode_utf16().collect(),
+        )
+    } else {
+        (path_units, Vec::new())
+    };
+    regular_units.extend_from_slice(path_units);
+    PathBuf::from(OsString::from_wide(&regular_units))
+}
 
 #[cfg(windows)]
 fn assert_regular_windows_path(path: &Path) {
@@ -26,6 +52,14 @@ async fn resolves_download_directories_relative_to_the_executable(
     let nested_existed = tokio::fs::try_exists(&nested_dir).await?;
     let unique_dir = models_dir.join(format!("dir-normalization-{}", std::process::id()));
     let outside_dir = executable_dir.join("dir-normalization-outside");
+    #[cfg(windows)]
+    let unique_dir_input = regular_windows_path(&unique_dir);
+    #[cfg(not(windows))]
+    let unique_dir_input = unique_dir.clone();
+    #[cfg(windows)]
+    let outside_dir_input = regular_windows_path(&outside_dir);
+    #[cfg(not(windows))]
+    let outside_dir_input = outside_dir.clone();
 
     let normalized_models = normalize_download_dir("models").await?;
     #[cfg(not(windows))]
@@ -57,8 +91,12 @@ async fn resolves_download_directories_relative_to_the_executable(
         );
     }
 
-    let normalized_absolute =
-        normalize_download_dir(unique_dir.to_str().ok_or("测试绝对路径不是有效 UTF-8")?).await?;
+    let normalized_absolute = normalize_download_dir(
+        unique_dir_input
+            .to_str()
+            .ok_or("测试绝对路径不是有效 UTF-8")?,
+    )
+    .await?;
     #[cfg(not(windows))]
     assert_eq!(
         normalized_absolute,
@@ -74,11 +112,13 @@ async fn resolves_download_directories_relative_to_the_executable(
     }
 
     assert!(normalize_download_dir("../x").await.is_err());
-    assert!(
-        normalize_download_dir(outside_dir.to_str().ok_or("测试外部路径不是有效 UTF-8")?,)
-            .await
-            .is_err()
-    );
+    assert!(normalize_download_dir(
+        outside_dir_input
+            .to_str()
+            .ok_or("测试外部路径不是有效 UTF-8")?,
+    )
+    .await
+    .is_err());
 
     tokio::fs::remove_dir_all(&unique_dir).await?;
     if !nested_existed {
