@@ -45,3 +45,44 @@ fn model_resolution_route_is_documented_as_public_for_external_catalog_models() 
         "string"
     );
 }
+
+#[test]
+fn model_download_route_is_public_with_stable_schemas_and_errors() {
+    let value = serde_json::to_value(generate_openapi_spec()).expect("OpenAPI 应可序列化");
+    let operation = &value["paths"]["/api/node/models/download"]["post"];
+
+    assert_eq!(operation["operationId"], "downloadNodeModel");
+    assert_eq!(operation["security"], serde_json::json!([]));
+    assert_eq!(
+        value["components"]["schemas"]["DownloadModelRequest"]["required"],
+        serde_json::json!([
+            "model",
+            "source",
+            "revision",
+            "variant_id",
+            "artifact_uri",
+            "checksum"
+        ])
+    );
+    assert_eq!(
+        value["components"]["schemas"]["DownloadModelData"]["properties"]["status"]["enum"],
+        serde_json::json!(["verified"])
+    );
+    assert_eq!(
+        value["components"]["schemas"]["ModelDownloadErrorResponse"]["properties"]["error"]
+            ["properties"]["code"]["enum"],
+        serde_json::json!([
+            "invalid_download_request",
+            "checksum_mismatch",
+            "download_failed",
+            "download_service_unavailable",
+            "download_storage_failed"
+        ])
+    );
+    for status in ["400", "422", "500", "502", "503"] {
+        assert_eq!(
+            operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ModelDownloadErrorResponse"
+        );
+    }
+}

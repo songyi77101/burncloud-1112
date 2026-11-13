@@ -525,8 +525,11 @@ async fn catalog_handoff_detects_once_and_stops_without_artifact_or_deployment()
     assert!(ui
         .probe
         .static_text
-        .contains("硬件检测与量化版本解析来自 Node 主服务"));
-    assert!(!ui.probe.static_text.contains("工件下载并校验后停止"));
+        .contains("硬件检测、模型下载和 SHA-256 摘要校验由 Node 服务完成"));
+    assert!(!ui
+        .probe
+        .static_text
+        .contains("模型文件已下载并完成校验（尚未部署）"));
     assert_eq!(*backend.calls.borrow(), vec!["hardware"]);
     let input = ui.probe.find("aria-label", "输入消息或指令", "input");
     assert_eq!(ui.probe.attributes[&input.0]["value"], "目录草稿");

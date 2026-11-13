@@ -1,19 +1,12 @@
-//! 主服务模型选择 HTTP 边界；保留独立的工件下载与校验能力。
+//! 主服务模型选择、模型解析和下载 HTTP 边界。
 
 use super::model::{
     valid_digest, ChatError, ErrorKind, Gpu, Hardware, InitializationRequest, ModelResolution,
-    ModelVariant, Operation, Platform, PreparationEvent, PreparationStage,
+    ModelVariant, Operation, Platform, PreparationEvent, PreparationStage, PreparedModel,
 };
 use reqwest::{Client, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
-use tokio::io::AsyncWriteExt;
-
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45);
+use std::time::Duration;
 
 /// 模块内部 HTTP 客户端；生产请求主服务，测试可注入本地响应。
 #[derive(Clone)]
@@ -117,6 +110,34 @@ struct RemoteAccelerator {
 struct RemoteHardwareError {
     code: String,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DownloadModelRequest {
+    model: String,
+    source: String,
+    revision: String,
+    variant_id: String,
+    artifact_uri: String,
+    checksum: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadEnvelope {
+    success: bool,
+    data: Option<DownloadData>,
+    error: Option<RemoteHardwareError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadData {
+    status: String,
+    model: String,
+    source: String,
+    revision: String,
+    variant_id: String,
+    local_path: String,
+    actual_sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -513,6 +534,133 @@ impl CatalogClient {
         snapshot.into_hardware()
     }
 
+    /// 在 Node 主服务上下载已确认的目录工件并校验 SHA-256。
+    ///
+    /// # Examples
+    ///
+    /// 目录解析成功后，将当前选中的版本快照交给此方法即可复用服务端下载器。
+    ///
+    /// # Notes
+    ///
+    /// 下载接口是单次等待请求，因此过程进度保持不定长；服务端返回成功后才交付
+    /// `Downloaded` 和 `Verified` 事件。返回的路径属于 Node 主机，不是客户端本地路径。
+    pub(super) async fn download_model(
+        &self,
+        request: &InitializationRequest,
+        mut callback: impl FnMut(PreparationEvent),
+    ) -> Result<PreparedModel, ChatError> {
+        let operation = Operation::Initialize(PreparationStage::Downloading);
+        let selection = request.model.catalog_selection.as_ref().ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidParameter,
+                operation,
+                "目录模型缺少仓库选择快照".into(),
+            )
+        })?;
+        selection.version.validate()?;
+        if !valid_digest(&request.variant.expected_sha256)
+            || request.variant.artifact_source.trim().is_empty()
+        {
+            return Err(failure(
+                ErrorKind::InvalidParameter,
+                operation,
+                "目录模型工件凭据无效".into(),
+            ));
+        }
+
+        callback(PreparationEvent::DownloadProgress {
+            completed: 0,
+            total: None,
+        });
+        let url = self
+            .base
+            .join("/api/node/models/download")
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .client
+            .post(url)
+            .header("Accept", "application/json")
+            .json(&DownloadModelRequest {
+                model: selection.version.model.clone(),
+                source: selection.version.source.clone(),
+                revision: selection.version.revision.clone(),
+                variant_id: request.variant.id.clone(),
+                artifact_uri: request.variant.artifact_source.clone(),
+                checksum: request.variant.expected_sha256.clone(),
+            })
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let envelope: DownloadEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                format!("模型下载接口响应格式无效：{error}"),
+            )
+        })?;
+        if !status.is_success() || !envelope.success {
+            let error = envelope.error.ok_or_else(|| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    operation,
+                    "模型下载失败响应缺少错误信息".into(),
+                )
+            })?;
+            return Err(download_error(error));
+        }
+
+        let data = envelope.data.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "模型下载成功响应缺少数据".into(),
+            )
+        })?;
+        if data.status != "verified"
+            || data.model != selection.version.model
+            || data.source != selection.version.source
+            || data.revision != selection.version.revision
+            || data.variant_id != request.variant.id
+            || data.local_path.trim().is_empty()
+            || data.local_path.contains('\0')
+            || !valid_digest(&data.actual_sha256)
+        {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "模型下载响应与当前选择不一致".into(),
+            ));
+        }
+        if !data
+            .actual_sha256
+            .eq_ignore_ascii_case(&request.variant.expected_sha256)
+        {
+            return Err(failure(
+                ErrorKind::VerificationFailed,
+                Operation::Initialize(PreparationStage::Verifying),
+                "服务端返回的模型摘要与预期不一致".into(),
+            ));
+        }
+
+        callback(PreparationEvent::Downloaded);
+        callback(PreparationEvent::Verified {
+            expected: request.variant.expected_sha256.clone(),
+            actual: data.actual_sha256.clone(),
+            path: data.local_path.clone(),
+        });
+        Ok(PreparedModel {
+            model: request.model.clone(),
+            variant: request.variant.clone(),
+            actual_sha256: data.actual_sha256,
+            local_path: data.local_path,
+        })
+    }
+
     async fn request(
         &self,
         path: &str,
@@ -736,13 +884,14 @@ impl CatalogModel {
     /// # Notes
     /// 不把缺失字段补成虚构仓库。
     pub(super) fn validate(&self) -> Result<(), ChatError> {
+        let id_matches_model = self
+            .model
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase() == self.id);
         if self.name.trim().is_empty()
             || !valid_resource(&self.model, &self.source, &self.revision)
-            || self
-                .model
-                .rsplit('/')
-                .next()
-                .is_none_or(|name| name.to_ascii_lowercase() != self.id)
+            || (!self.preset && !id_matches_model)
         {
             return Err(invalid_search("模型目录条目无效或资源不完整"));
         }
@@ -799,203 +948,25 @@ impl<T> CatalogPage<T> {
     }
 }
 
-/// 生产环境的工件保存根目录：`<本地数据目录>/BurnCloud/models`。
-pub(super) fn download_root() -> Result<PathBuf, ChatError> {
-    dirs::data_local_dir()
-        .map(|dir| dir.join("BurnCloud").join("models"))
-        .ok_or_else(|| {
-            failure(
-                ErrorKind::NotConnected,
-                Operation::Initialize(PreparationStage::Downloading),
-                "无法确定本地数据目录".into(),
-            )
-        })
-}
-
-/// 流式下载已确认的目录工件并校验 SHA-256，成功时返回本地路径。
-///
-/// # Notes
-/// 先写入 `.part`，字节数与摘要一致后才重命名；失败时删除临时文件。
-/// 依次回调下载进度（最多每 1% 一次）、`Downloaded` 与 `Verified`，不执行部署。
-pub(super) async fn download(
-    root: &Path,
-    request: &InitializationRequest,
-    mut callback: impl FnMut(PreparationEvent),
-) -> Result<String, ChatError> {
-    let downloading = Operation::Initialize(PreparationStage::Downloading);
-    let variant = &request.variant;
-    let url = Url::parse(&variant.artifact_source)
-        .ok()
-        .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
-    let (Some(selection), Some(url)) = (request.model.catalog_selection.as_ref(), url) else {
-        return Err(failure(
-            ErrorKind::InvalidParameter,
-            downloading,
-            "缺少目录选择快照或工件地址无效".into(),
-        ));
-    };
-    let file_name = url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("model");
-    let v = &selection.version;
-    let dir = root
-        .join(segment(&v.source))
-        .join(segment(&v.model))
-        .join(segment(&v.revision));
-    let target = dir.join(segment(&format!("{}-{file_name}", variant.id)));
-    let mut part = target.clone().into_os_string();
-    part.push(".part");
-    let part = PathBuf::from(part);
-
-    if let Err(error) = fetch(&url, &dir, &part, variant, &mut callback).await {
-        remove_part(&part).await;
-        return Err(error);
-    }
-    let io = |error: std::io::Error| {
-        failure(
-            ErrorKind::InvalidResult,
-            downloading,
-            format!("保存模型文件失败：{error}"),
-        )
-    };
-    let replaced = match tokio::fs::remove_file(&target).await {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(io(error)),
-        _ => tokio::fs::rename(&part, &target).await.map_err(io),
-    };
-    if let Err(error) = replaced {
-        remove_part(&part).await;
-        return Err(error);
-    }
-    let path = target.to_string_lossy().into_owned();
-    // 状态机严格比较摘要字符串，因此实际摘要沿用预期摘要的原始写法。
-    callback(PreparationEvent::Verified {
-        expected: variant.expected_sha256.clone(),
-        actual: variant.expected_sha256.clone(),
-        path: path.clone(),
-    });
-    Ok(path)
-}
-
-/// 下载与校验已完成、但部署尚未接入时的终止原因。
-pub(super) fn deployment_missing(path: &str) -> ChatError {
-    failure(
-        ErrorKind::NotConnected,
-        Operation::Initialize(PreparationStage::LoadingPackage),
-        format!("模型已下载并通过摘要校验（{path}），尚未接入部署"),
-    )
-}
-
-async fn fetch(
-    url: &Url,
-    dir: &Path,
-    part: &Path,
-    variant: &ModelVariant,
-    callback: &mut impl FnMut(PreparationEvent),
-) -> Result<(), ChatError> {
-    let downloading = Operation::Initialize(PreparationStage::Downloading);
-    let io = |error: std::io::Error| {
-        failure(
-            ErrorKind::InvalidResult,
-            downloading,
-            format!("写入模型文件失败：{error}"),
-        )
-    };
-    let size_mismatch = || {
-        failure(
-            ErrorKind::VerificationFailed,
-            Operation::Initialize(PreparationStage::Verifying),
-            "校验失败：下载字节数与声明大小不一致".into(),
-        )
-    };
-    tokio::fs::create_dir_all(dir).await.map_err(io)?;
-    let mut file = tokio::fs::File::create(part).await.map_err(io)?;
-    let client = Client::builder()
-        .connect_timeout(DOWNLOAD_TIMEOUT)
-        .read_timeout(DOWNLOAD_TIMEOUT)
-        .build()
-        .map_err(download_failure)?;
-    let mut response = client
-        .get(url.clone())
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(download_failure)?;
-    let total = variant.disk_bytes;
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    let mut last_percent = None;
-    while let Some(chunk) = response.chunk().await.map_err(download_failure)? {
-        received = received.saturating_add(chunk.len() as u64);
-        // 超过声明大小立即中止，防止异常来源写满磁盘。
-        if received > total {
-            return Err(size_mismatch());
-        }
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(io)?;
-        // 高频回调会反复刷新界面，只在百分比变化时上报。
-        let percent = u128::from(received) * 100 / u128::from(total);
-        if last_percent != Some(percent) {
-            last_percent = Some(percent);
-            callback(PreparationEvent::DownloadProgress {
-                completed: received,
-                total: Some(total),
-            });
-        }
-    }
-    file.flush().await.map_err(io)?;
-    drop(file);
-    if received != total {
-        return Err(size_mismatch());
-    }
-    callback(PreparationEvent::Downloaded);
-    let actual = format!("{:x}", hasher.finalize());
-    let expected = variant
-        .expected_sha256
-        .strip_prefix("sha256:")
-        .unwrap_or(&variant.expected_sha256);
-    if !actual.eq_ignore_ascii_case(expected) {
-        return Err(failure(
-            ErrorKind::VerificationFailed,
-            Operation::Initialize(PreparationStage::Verifying),
-            "校验失败：SHA-256 摘要不一致".into(),
-        ));
-    }
-    Ok(())
-}
-
-async fn remove_part(part: &Path) {
-    if let Err(error) = tokio::fs::remove_file(part).await {
-        // 清理失败不覆盖原始错误；残留的 .part 会在下次下载时被截断覆盖。
-        tracing::warn!("删除临时模型文件失败：{error}");
-    }
-}
-
-/// 路径段只保留 `[A-Za-z0-9._-]`，并拒绝纯点号段，防止路径穿越。
-fn segment(value: &str) -> String {
-    let cleaned: String = value
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.chars().all(|c| c == '.') {
-        "_".into()
+fn download_error(error: RemoteHardwareError) -> ChatError {
+    let operation = if error.code == "checksum_mismatch" || error.code == "download_storage_failed"
+    {
+        Operation::Initialize(PreparationStage::Verifying)
     } else {
-        cleaned
-    }
-}
-
-fn download_failure(error: reqwest::Error) -> ChatError {
-    let reason = format!("模型文件下载失败，请重试：{error}");
-    let mut result = transport(error, Operation::Initialize(PreparationStage::Downloading));
-    result.reason = reason;
-    result
+        Operation::Initialize(PreparationStage::Downloading)
+    };
+    let kind = match error.code.as_str() {
+        "invalid_download_request" => ErrorKind::InvalidParameter,
+        "checksum_mismatch" => ErrorKind::VerificationFailed,
+        "download_service_unavailable" | "download_failed" => ErrorKind::ExecutionFailed,
+        "download_storage_failed" => ErrorKind::VerificationFailed,
+        _ => ErrorKind::InvalidResult,
+    };
+    failure(
+        kind,
+        operation,
+        format!("{}: {}", error.code, error.message),
+    )
 }
 
 fn failure(kind: ErrorKind, operation: Operation, reason: String) -> ChatError {

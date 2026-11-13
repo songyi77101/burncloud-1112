@@ -12,6 +12,7 @@ pub mod billing;
 pub mod channel;
 mod hardware;
 pub mod log;
+mod model_download;
 mod model_resolution;
 pub mod monitor;
 #[expect(
@@ -35,6 +36,7 @@ pub fn routes(state: AppState) -> Router {
     let public_routes = Router::new()
         .merge(auth::public_routes())
         .merge(hardware::routes())
+        .merge(model_download::routes())
         .merge(model_resolution::routes())
         .with_state(state.clone());
 

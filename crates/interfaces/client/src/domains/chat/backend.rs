@@ -57,7 +57,7 @@ pub(super) trait ChatBackend {
     ) -> BackendFuture<ModelResolution> {
         self.resolve_model(String::new(), callback)
     }
-    /// 仅接受用户已确认版本；依次回调下载、校验、加载、部署、健康和上报。
+    /// 仅接受用户已确认版本；目录模型回调下载和校验后停在文件已就绪，本地替身继续完成后续模拟阶段。
     fn initialize(
         &self,
         request: InitializationRequest,
@@ -174,7 +174,7 @@ async fn pause() {
     tokio::time::sleep(std::time::Duration::from_millis(180)).await;
 }
 
-/// 生产页面使用主服务硬件接口，其他未接入能力继续复用本地占位实现。
+/// 生产页面使用主服务硬件与目录下载接口；本地占位模型继续复用本地模拟实现。
 pub(super) struct HttpBackend {
     local: LocalBackend,
     hardware_client: Result<CatalogClient, ChatError>,
@@ -239,7 +239,19 @@ impl ChatBackend for HttpBackend {
         request: InitializationRequest,
         callback: Callback<PreparationEvent>,
     ) -> BackendFuture<PreparedModel> {
-        self.local.initialize(request, callback)
+        if request.model.catalog_selection.is_some() {
+            let hardware_client = self.hardware_client.clone();
+            Box::pin(async move {
+                let client = hardware_client.map_err(|error| ChatError {
+                    kind: error.kind,
+                    operation: Operation::Initialize(PreparationStage::Downloading),
+                    reason: error.reason,
+                })?;
+                client.download_model(&request, callback).await
+            })
+        } else {
+            self.local.initialize(request, callback)
+        }
     }
 
     fn generate(

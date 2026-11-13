@@ -18,6 +18,7 @@ pub use api::auth::{auth_middleware, Claims};
 use axum::http::HeaderName;
 use axum::{middleware, routing::get, Router};
 use burncloud_database::{create_default_database, Database};
+use burncloud_download::DownloadManager;
 use burncloud_node_runtime::{NodeContext, NodeRuntime};
 use burncloud_router::create_router_app_with_route_miss;
 use burncloud_router::local_attachment::LocalRouteManager;
@@ -30,7 +31,7 @@ use burncloud_supply_channel::ChannelProtocolConfigModel;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OnceCell};
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -75,6 +76,8 @@ impl fmt::Debug for InternalSecret {
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
+    /// 延迟初始化的模型下载管理器，避免服务启动时无条件启动 aria2。
+    pub(crate) download_manager: Arc<OnceCell<DownloadManager>>,
     pub node_context: NodeContext,
     /// 模型选择完成后调用的生产硬件探测和解析入口。
     pub production_node: Arc<node_production::ProductionNode>,
@@ -154,6 +157,7 @@ pub async fn create_app_with_node_request_state(
 
     let state = AppState {
         db: db.clone(),
+        download_manager: Arc::new(OnceCell::new()),
         node_context,
         production_node: Arc::new(node_production::ProductionNode::new()),
         node_request_state,
