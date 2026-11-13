@@ -77,89 +77,102 @@ async fn resolves_download_directories_relative_to_the_executable(
     #[cfg(not(windows))]
     let outside_dir_input = outside_dir.clone();
 
-    let normalized_models = normalize_download_dir("models").await?;
-    #[cfg(not(windows))]
-    assert_eq!(
-        normalized_models,
-        tokio::fs::canonicalize(&models_dir).await?
-    );
-    #[cfg(windows)]
-    {
-        assert_regular_windows_path(&normalized_models);
+    let test_result = async {
+        let normalized_models = normalize_download_dir("models").await?;
+        #[cfg(not(windows))]
         assert_eq!(
-            tokio::fs::canonicalize(&normalized_models).await?,
+            normalized_models,
             tokio::fs::canonicalize(&models_dir).await?
         );
-    }
+        #[cfg(windows)]
+        {
+            assert_regular_windows_path(&normalized_models);
+            assert_eq!(
+                tokio::fs::canonicalize(&normalized_models).await?,
+                tokio::fs::canonicalize(&models_dir).await?
+            );
+        }
 
-    #[cfg(windows)]
-    let absolute_models_input = regular_windows_path(&models_dir);
-    #[cfg(not(windows))]
-    let absolute_models_input = models_dir.clone();
-    let normalized_absolute_models = normalize_download_dir(
-        absolute_models_input
-            .to_str()
-            .ok_or("测试 models 绝对路径不是有效 UTF-8")?,
-    )
-    .await?;
-    #[cfg(not(windows))]
-    assert_eq!(
-        normalized_absolute_models,
-        tokio::fs::canonicalize(&models_dir).await?
-    );
-    #[cfg(windows)]
-    {
-        assert_regular_windows_path(&normalized_absolute_models);
+        #[cfg(windows)]
+        let absolute_models_input = regular_windows_path(&models_dir);
+        #[cfg(not(windows))]
+        let absolute_models_input = models_dir.clone();
+        let normalized_absolute_models = normalize_download_dir(
+            absolute_models_input
+                .to_str()
+                .ok_or("测试 models 绝对路径不是有效 UTF-8")?,
+        )
+        .await?;
+        #[cfg(not(windows))]
         assert_eq!(
-            tokio::fs::canonicalize(&normalized_absolute_models).await?,
+            normalized_absolute_models,
             tokio::fs::canonicalize(&models_dir).await?
         );
-    }
+        #[cfg(windows)]
+        {
+            assert_regular_windows_path(&normalized_absolute_models);
+            assert_eq!(
+                tokio::fs::canonicalize(&normalized_absolute_models).await?,
+                tokio::fs::canonicalize(&models_dir).await?
+            );
+        }
 
-    let normalized_nested = normalize_download_dir("models/sub").await?;
-    #[cfg(not(windows))]
-    assert_eq!(
-        normalized_nested,
-        tokio::fs::canonicalize(&nested_dir).await?
-    );
-    #[cfg(windows)]
-    {
-        assert_regular_windows_path(&normalized_nested);
+        let normalized_nested = normalize_download_dir("models/sub").await?;
+        #[cfg(not(windows))]
         assert_eq!(
-            tokio::fs::canonicalize(&normalized_nested).await?,
+            normalized_nested,
             tokio::fs::canonicalize(&nested_dir).await?
         );
-    }
+        #[cfg(windows)]
+        {
+            assert_regular_windows_path(&normalized_nested);
+            assert_eq!(
+                tokio::fs::canonicalize(&normalized_nested).await?,
+                tokio::fs::canonicalize(&nested_dir).await?
+            );
+        }
 
-    let normalized_absolute = normalize_download_dir(
-        unique_dir_input
-            .to_str()
-            .ok_or("测试绝对路径不是有效 UTF-8")?,
-    )
-    .await?;
-    #[cfg(not(windows))]
-    assert_eq!(
-        normalized_absolute,
-        tokio::fs::canonicalize(&unique_dir).await?
-    );
-    #[cfg(windows)]
-    {
-        assert_regular_windows_path(&normalized_absolute);
+        let normalized_absolute = normalize_download_dir(
+            unique_dir_input
+                .to_str()
+                .ok_or("测试绝对路径不是有效 UTF-8")?,
+        )
+        .await?;
+        #[cfg(not(windows))]
         assert_eq!(
-            tokio::fs::canonicalize(&normalized_absolute).await?,
+            normalized_absolute,
             tokio::fs::canonicalize(&unique_dir).await?
         );
+        #[cfg(windows)]
+        {
+            assert_regular_windows_path(&normalized_absolute);
+            assert_eq!(
+                tokio::fs::canonicalize(&normalized_absolute).await?,
+                tokio::fs::canonicalize(&unique_dir).await?
+            );
+        }
+
+        assert!(normalize_download_dir("../x").await.is_err());
+        assert!(normalize_download_dir(
+            outside_dir_input
+                .to_str()
+                .ok_or("测试外部路径不是有效 UTF-8")?,
+        )
+        .await
+        .is_err());
+
+        let current_dir_models = std::env::current_dir()?.join("models");
+        if let Ok(current_dir_models) = tokio::fs::canonicalize(current_dir_models).await {
+            assert_ne!(
+                normalized_models, current_dir_models,
+                "下载目录不能以当前工作目录为基准"
+            );
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
     }
+    .await;
 
-    assert!(normalize_download_dir("../x").await.is_err());
-    assert!(normalize_download_dir(
-        outside_dir_input
-            .to_str()
-            .ok_or("测试外部路径不是有效 UTF-8")?,
-    )
-    .await
-    .is_err());
-
+    // 即使断言失败，也必须清理本测试创建的目录，避免污染后续真实部署测试。
     tokio::fs::remove_dir_all(&unique_dir).await?;
     if !nested_existed {
         tokio::fs::remove_dir_all(&nested_dir).await?;
@@ -171,12 +184,5 @@ async fn resolves_download_directories_relative_to_the_executable(
         }
     }
 
-    let current_dir_models = std::env::current_dir()?.join("models");
-    if let Ok(current_dir_models) = tokio::fs::canonicalize(current_dir_models).await {
-        assert_ne!(
-            normalized_models, current_dir_models,
-            "下载目录不能以当前工作目录为基准"
-        );
-    }
-    Ok(())
+    test_result
 }
