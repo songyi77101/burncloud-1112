@@ -20,7 +20,7 @@
 - `cargo fmt --all -- --check`：通过。
 - `cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`：通过。
 - `cargo test -p burncloud-download --all-targets --offline`：通过，Windows 目标下 15 项单元测试、1 项公有接口测试全部通过。
-- `cargo check -p burncloud-download --target x86_64-pc-windows-msvc --offline`：待本次实现收尾前重新执行。
+- `cargo check -p burncloud-download --target x86_64-pc-windows-msvc --offline`：通过。
 - 对照失败报告：普通 Windows 绝对下载目录在恢复时统一为与 canonicalize 一致的路径表示，避免恢复、重建、失败和并发链路在边界检查阶段提前返回 `InvalidDirectory`。
 - 对照任务验收标准：不新增公有接口，不改变现有公有函数签名或错误类型；路径安全校验、模型根目录边界和非 Windows 行为保持不变。
 
