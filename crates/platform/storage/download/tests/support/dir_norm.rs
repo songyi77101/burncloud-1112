@@ -63,9 +63,11 @@ async fn resolves_download_directories_relative_to_the_executable(
     let executable_dir =
         tokio::fs::canonicalize(executable.parent().ok_or("测试可执行文件没有父目录")?).await?;
     let models_dir = executable_dir.join("models");
-    let models_existed = tokio::fs::try_exists(&models_dir).await?;
+    // 测试目录可能来自上一次失败运行；先清空它，避免残留的 models 目录影响真实部署测试。
+    if tokio::fs::try_exists(&models_dir).await? {
+        tokio::fs::remove_dir_all(&models_dir).await?;
+    }
     let nested_dir = models_dir.join("sub");
-    let nested_existed = tokio::fs::try_exists(&nested_dir).await?;
     let unique_dir = models_dir.join(format!("dir-normalization-{}", std::process::id()));
     let outside_dir = executable_dir.join("dir-normalization-outside");
     #[cfg(windows)]
@@ -173,15 +175,8 @@ async fn resolves_download_directories_relative_to_the_executable(
     .await;
 
     // 即使断言失败，也必须清理本测试创建的目录，避免污染后续真实部署测试。
-    tokio::fs::remove_dir_all(&unique_dir).await?;
-    if !nested_existed {
-        tokio::fs::remove_dir_all(&nested_dir).await?;
-    }
-    if !models_existed {
-        let mut entries = tokio::fs::read_dir(&models_dir).await?;
-        if entries.next_entry().await?.is_none() {
-            tokio::fs::remove_dir(&models_dir).await?;
-        }
+    if tokio::fs::try_exists(&models_dir).await? {
+        tokio::fs::remove_dir_all(&models_dir).await?;
     }
 
     test_result

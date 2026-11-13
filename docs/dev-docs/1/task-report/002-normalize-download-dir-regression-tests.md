@@ -22,3 +22,8 @@
 - `cargo check -p burncloud-download --target x86_64-pc-windows-msvc --offline`：通过。
 - 对照失败报告：测试目录清理现在在断言失败后仍执行，降低失败单元测试残留 `deps\\models` 目录污染真实部署黑盒 `T11` 的风险；本次未修改生产下载流程、恢复流程、aria2 调用或 `normalize_aria2_path`。
 - 对照任务验收标准：Windows `models`、`models/sub`、模型根目录内绝对路径、父目录组件与模型根目录外路径均覆盖；测试代码位于独立测试目录，未修改生产源码中的测试代码或 `normalize_aria2_path` 预期。
+## 回流修复记录（implement）
+
+- 针对失败报告中的 `target\\debug\\deps\\models` 残留，调整目录规范化回归测试的夹具生命周期：测试开始前清理上次失败遗留的 `models` 目录，测试结束或断言失败后统一清理本次测试创建的目录。
+- 测试仍仅覆盖可执行文件同级目录语义，不修改生产源码；`models/sub`、绝对路径、越界输入和非 Windows 分支断言保持不变。
+- 回流检查：`cargo fmt --all`、`cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`、`cargo test -p burncloud-download --all-targets --offline` 均通过。
