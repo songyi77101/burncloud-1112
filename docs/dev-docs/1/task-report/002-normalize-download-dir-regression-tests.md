@@ -2,20 +2,21 @@
 
 ## 修改的信息
 
-- 在 Windows 条件测试中增加扩展长度路径与普通盘符路径之间的测试输入转换，确保绝对目录回归场景真实覆盖恢复记录使用的普通 Windows 路径格式。
-- 保留并继续验证 `models`、`models/sub` 和模型根目录约束内绝对目录的返回结果不带 `\\?\` 前缀，且 canonicalize 后仍指向同一目录。
-- 越界绝对路径改用普通 Windows 路径输入验证拒绝行为；父目录组件、测试目录清理、非 Windows 路径比较和既有下载路径传递测试保持不变。
+- 在 Windows 条件测试中同时覆盖 canonicalize 可能产生的 `\\?\` 与 `//?/` 扩展长度路径输入，转换为普通盘符路径后验证规范化目录可被再次解析。
+- 增加模型根目录普通绝对路径的重复规范化场景，模拟数据库恢复记录保存并重新读取 `download_dir` 的路径传递链路。
+- 保留并继续验证 `models`、`models/sub`、模型根目录内绝对目录、父目录组件与模型根目录外路径；测试清理逻辑和非 Windows 路径断言保持不变。
 
 ## 修改的文件与文件内位置
 
 - `crates/platform/storage/download/tests/support/dir_norm.rs`
-  - 新增 Windows 条件辅助函数 `regular_windows_path`，将测试输入转换为普通 Windows 路径以覆盖失败报告中的恢复场景。
-  - 更新 `resolves_download_directories_relative_to_the_executable` 的绝对路径与越界绝对路径调用。
+  - `regular_windows_path`：兼容 `\\?\`、`//?/`、UNC 和不同分隔符形式的 Windows 路径输入。
+  - `resolves_download_directories_relative_to_the_executable`：增加模型根目录普通绝对路径及重复规范化回归覆盖，验证返回路径不带扩展长度前缀且仍指向 executable 同级 `models`。
 
 ## 检查结果
 
+- `cargo fmt --all`：通过。
 - `cargo fmt --all -- --check`：通过。
 - `cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`：通过。
-- `cargo test -p burncloud-download --all-targets --offline`：通过，Windows 目标下目录规范化测试、其他单元测试与公有接口测试全部通过。
+- `cargo test -p burncloud-download --all-targets --offline`：通过，16 项测试全部通过（15 项单元测试、1 项公有接口测试）。
 - `cargo check -p burncloud-download --target x86_64-pc-windows-msvc --offline`：通过。
-- 对照任务验收标准：覆盖普通 Windows 绝对路径、`models`、`models/sub`、父目录组件与模型根目录外路径；测试代码位于独立测试目录，未修改生产源码中的测试代码或 `normalize_aria2_path` 预期。
+- 对照任务验收标准：Windows `models`、`models/sub`、模型根目录内绝对路径、父目录组件与模型根目录外路径均覆盖；已有越界符号链接测试及下载 / 路径传递测试未修改；非 Windows 路径断言保持条件编译；测试代码位于独立测试目录，未修改生产源码中的测试代码或 `normalize_aria2_path` 预期。

@@ -16,21 +16,37 @@ use super::normalize_download_dir;
 fn regular_windows_path(path: &Path) -> PathBuf {
     let path_units: Vec<u16> = path.as_os_str().encode_wide().collect();
     let extended_prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
-    if !path_units.starts_with(&extended_prefix) {
+    let slash_extended_prefix: Vec<u16> = r"//?/".encode_utf16().collect();
+    let path_units = if path_units.starts_with(&extended_prefix) {
+        &path_units[extended_prefix.len()..]
+    } else if path_units.starts_with(&slash_extended_prefix) {
+        &path_units[slash_extended_prefix.len()..]
+    } else {
         return path.to_path_buf();
-    }
+    };
 
-    let path_units = &path_units[extended_prefix.len()..];
     let unc_prefix: Vec<u16> = r"UNC\".encode_utf16().collect();
+    let slash_unc_prefix: Vec<u16> = r"UNC/".encode_utf16().collect();
     let (path_units, mut regular_units) = if path_units.starts_with(&unc_prefix) {
         (
             &path_units[unc_prefix.len()..],
             r"\\".encode_utf16().collect(),
         )
+    } else if path_units.starts_with(&slash_unc_prefix) {
+        (
+            &path_units[slash_unc_prefix.len()..],
+            r"\\".encode_utf16().collect(),
+        )
     } else {
         (path_units, Vec::new())
     };
-    regular_units.extend_from_slice(path_units);
+    regular_units.extend(path_units.iter().map(|unit| {
+        if *unit == b'/' as u16 {
+            b'\\' as u16
+        } else {
+            *unit
+        }
+    }));
     PathBuf::from(OsString::from_wide(&regular_units))
 }
 
@@ -72,6 +88,30 @@ async fn resolves_download_directories_relative_to_the_executable(
         assert_regular_windows_path(&normalized_models);
         assert_eq!(
             tokio::fs::canonicalize(&normalized_models).await?,
+            tokio::fs::canonicalize(&models_dir).await?
+        );
+    }
+
+    #[cfg(windows)]
+    let absolute_models_input = regular_windows_path(&models_dir);
+    #[cfg(not(windows))]
+    let absolute_models_input = models_dir.clone();
+    let normalized_absolute_models = normalize_download_dir(
+        absolute_models_input
+            .to_str()
+            .ok_or("测试 models 绝对路径不是有效 UTF-8")?,
+    )
+    .await?;
+    #[cfg(not(windows))]
+    assert_eq!(
+        normalized_absolute_models,
+        tokio::fs::canonicalize(&models_dir).await?
+    );
+    #[cfg(windows)]
+    {
+        assert_regular_windows_path(&normalized_absolute_models);
+        assert_eq!(
+            tokio::fs::canonicalize(&normalized_absolute_models).await?,
             tokio::fs::canonicalize(&models_dir).await?
         );
     }
