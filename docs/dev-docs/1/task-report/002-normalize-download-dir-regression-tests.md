@@ -27,3 +27,14 @@
 - 针对失败报告中的 `target\\debug\\deps\\models` 残留，调整目录规范化回归测试的夹具生命周期：测试开始前清理上次失败遗留的 `models` 目录，测试结束或断言失败后统一清理本次测试创建的目录。
 - 测试仍仅覆盖可执行文件同级目录语义，不修改生产源码；`models/sub`、绝对路径、越界输入和非 Windows 分支断言保持不变。
 - 回流检查：`cargo fmt --all`、`cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`、`cargo test -p burncloud-download --all-targets --offline` 均通过。
+## 回流修复记录（implement，2026-11-14）
+
+- 针对失败报告中的 `T11`，将真实部署测试的 models 目录扫描范围限定为当前可执行文件同级 `models` 目录及其子目录，不再把 `target\debug\deps\models` 等其他测试目标的夹具误计入本次部署结果。
+- 保留 `models/models` 嵌套目录检查与当前可执行文件同级目录检查，未放宽生产目录边界，也未修改测试流程文档。
+
+### 回流检查结果
+
+- `cargo fmt --all`：通过。
+- `cargo fmt --all -- --check`：通过。
+- `cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`：通过。
+- `cargo test -p burncloud-download --all-targets --offline`：通过，15 项单元测试与 1 项公有接口测试全部通过。
