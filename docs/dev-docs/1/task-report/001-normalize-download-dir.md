@@ -23,3 +23,9 @@
 - `cargo check -p burncloud-download --target x86_64-pc-windows-msvc --offline`：待本次实现收尾前重新执行。
 - 对照失败报告：普通 Windows 绝对下载目录在恢复时统一为与 canonicalize 一致的路径表示，避免恢复、重建、失败和并发链路在边界检查阶段提前返回 `InvalidDirectory`。
 - 对照任务验收标准：不新增公有接口，不改变现有公有函数签名或错误类型；路径安全校验、模型根目录边界和非 Windows 行为保持不变。
+
+## 回流修复记录（implement）
+
+- 针对失败报告中的 Windows 路径表示不一致，补充普通路径分支的分隔符归一化：即使 `canonicalize` 已返回普通 Windows 路径，也转换为统一的反斜杠表示后再交给下载链路。
+- 未改变模型根目录、安全校验、目录创建、canonicalize 顺序及公有接口；扩展长度路径仍在最终边界检查成功后转换。
+- 回流检查：`cargo fmt --all`、`cargo clippy -p burncloud-download --all-targets --offline -- -D warnings`、`cargo test -p burncloud-download --all-targets --offline` 均通过。

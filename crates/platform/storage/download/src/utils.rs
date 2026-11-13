@@ -174,7 +174,9 @@ fn to_regular_windows_path(path: &Path) -> Option<PathBuf> {
     } else if path_units.starts_with(&slash_extended_prefix) {
         &path_units[slash_extended_prefix.len()..]
     } else {
-        return Some(path.to_path_buf());
+        // 即使系统返回普通路径，也统一分隔符，避免数据库记录与 aria2 返回路径使用不同表示。
+        let regular_units = normalize_windows_separators(&path_units);
+        return Some(PathBuf::from(OsString::from_wide(&regular_units)));
     };
 
     let unc_prefix = "UNC\\".encode_utf16().collect::<Vec<_>>();
