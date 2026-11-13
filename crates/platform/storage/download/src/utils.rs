@@ -78,7 +78,15 @@ pub(super) async fn normalize_download_dir(dir: &str) -> Result<PathBuf> {
         .next()
         .is_some_and(|component| component.as_os_str() == "models");
     let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
+        #[cfg(windows)]
+        {
+            // canonicalize 返回扩展长度路径，先统一绝对输入的表示才能继续执行同一套边界检查。
+            to_extended_windows_path(requested)
+        }
+        #[cfg(not(windows))]
+        {
+            requested.to_path_buf()
+        }
     } else if starts_at_models {
         executable_dir.join(requested)
     } else {
@@ -156,6 +164,24 @@ pub(super) async fn existing_database_file(final_path: &str) -> Result<Option<Pa
     }
 }
 
+#[cfg(windows)]
+fn to_extended_windows_path(path: &Path) -> PathBuf {
+    let path_units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let extended_prefix: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+    if path_units.starts_with(&extended_prefix) {
+        return path.to_path_buf();
+    }
+
+    let unc_prefix: Vec<u16> = "\\\\".encode_utf16().collect();
+    let mut extended_units = extended_prefix;
+    if path_units.starts_with(&unc_prefix) {
+        extended_units.extend("UNC\\".encode_utf16());
+        extended_units.extend_from_slice(&path_units[unc_prefix.len()..]);
+    } else {
+        extended_units.extend(path_units);
+    }
+    PathBuf::from(OsString::from_wide(&extended_units))
+}
 async fn ensure_existing_path_inside(root: &Path, candidate: &Path) -> Result<()> {
     let relative = candidate.strip_prefix(root).map_err(|_| {
         DownloadError::InvalidDirectory("目录必须位于可执行文件同级 models 子目录内".to_string())
