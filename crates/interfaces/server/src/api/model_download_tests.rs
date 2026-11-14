@@ -240,3 +240,30 @@ async fn responses_are_json_and_not_cacheable() {
     let value: serde_json::Value = serde_json::from_slice(&body).expect("成功响应为 JSON");
     assert_eq!(value["data"]["status"], "verified");
 }
+
+#[test]
+fn task_id_parser_accepts_only_decimal_i64_values() {
+    assert_eq!(parse_task_id("42"), Ok(42));
+    assert_eq!(parse_task_id(" 42 "), Ok(42));
+    assert!(parse_task_id("").is_err());
+    assert!(parse_task_id("-1").is_err());
+    assert!(parse_task_id("1x").is_err());
+    assert!(parse_task_id("9223372036854775808").is_err());
+}
+
+#[test]
+fn validated_identity_contains_scoped_storage_and_filename() {
+    let validated = validate_request(request(
+        DownloadSource::HuggingFace,
+        "TheBloke/TinyLlama",
+        "main",
+        "nested/ggml-model-Q4_K_M.gguf",
+        "https://huggingface.co/TheBloke/TinyLlama/resolve/main/nested/ggml-model-Q4_K_M.gguf",
+        CHECKSUM,
+    ))
+    .expect("固定下载请求有效");
+
+    assert_eq!(validated.filename, "ggml-model-Q4_K_M.gguf");
+    assert!(validated.storage_directory.contains("huggingface"));
+    assert!(validated.storage_directory.contains(&CHECKSUM[7..]));
+}

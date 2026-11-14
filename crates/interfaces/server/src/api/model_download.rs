@@ -21,7 +21,7 @@ pub(super) fn routes() -> Router<AppState> {
     Router::new().route("/api/node/models/download", post(download_model))
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum DownloadSource {
     #[serde(rename = "modelscope")]
@@ -50,7 +50,7 @@ impl DownloadSource {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct DownloadModelRequest {
     model: String,
     source: DownloadSource,
@@ -60,14 +60,65 @@ struct DownloadModelRequest {
     checksum: String,
 }
 
-#[derive(Debug)]
-struct ValidatedDownload {
+#[derive(Clone, Debug)]
+struct DownloadRequestIdentity {
     model: String,
     source: DownloadSource,
     revision: String,
     variant_id: String,
     artifact_uri: String,
     checksum: String,
+    storage_directory: String,
+    filename: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum DownloadTaskState {
+    Queued,
+    Downloading,
+    Verifying,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct TaskError {
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct DownloadTaskData {
+    task_id: String,
+    status: DownloadTaskState,
+    model: String,
+    source: String,
+    revision: String,
+    variant_id: String,
+    completed_bytes: u64,
+    total_bytes: Option<u64>,
+    download_speed: u64,
+    error: Option<TaskError>,
+    local_path: Option<String>,
+    actual_sha256: Option<String>,
+}
+
+type ValidatedDownload = DownloadRequestIdentity;
+
+#[derive(Clone, Debug)]
+struct DownloadTaskSnapshot {
+    task_id: i64,
+    gid: String,
+    identity: DownloadRequestIdentity,
+    status: DownloadTaskState,
+    completed_bytes: u64,
+    total_bytes: Option<u64>,
+    download_speed: u64,
+    error: Option<TaskError>,
+    final_path: Option<String>,
+    actual_sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,13 +260,25 @@ fn validate_request(request: DownloadModelRequest) -> Result<ValidatedDownload, 
         return Err("工件地址必须是支持仓库的 HTTPS GGUF resolve 地址");
     }
 
-    Ok(ValidatedDownload {
+    let filename = variant_id
+        .rsplit('/')
+        .next()
+        .map(safe_path_segment)
+        .ok_or("量化版本文件名无效")?;
+    let identity = DownloadRequestIdentity {
         model,
         source: request.source,
         revision,
         variant_id,
         artifact_uri,
         checksum,
+        storage_directory: String::new(),
+        filename,
+    };
+    let storage_directory = storage_directory(&identity);
+    Ok(DownloadRequestIdentity {
+        storage_directory,
+        ..identity
     })
 }
 
@@ -274,7 +337,7 @@ fn normalize_checksum(value: &str) -> Option<String> {
         .then(|| format!("sha256:{}", digest.to_ascii_lowercase()))
 }
 
-fn storage_directory(request: &ValidatedDownload) -> String {
+fn storage_directory(request: &DownloadRequestIdentity) -> String {
     let checksum = request
         .checksum
         .strip_prefix("sha256:")
@@ -286,6 +349,14 @@ fn storage_directory(request: &ValidatedDownload) -> String {
         safe_path_segment(&request.revision),
         checksum
     )
+}
+
+fn parse_task_id(value: &str) -> Result<i64, &'static str> {
+    let value = value.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("任务 ID 必须是十进制数字");
+    }
+    value.parse::<i64>().map_err(|_| "任务 ID 超出有效范围")
 }
 
 fn safe_path_segment(value: &str) -> String {
