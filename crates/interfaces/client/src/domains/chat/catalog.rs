@@ -610,11 +610,17 @@ impl CatalogClient {
         decode_download_task(response, operation).await
     }
 
-    #[allow(
-        dead_code,
-        reason = "Preparation 取消路径将在后续任务通过 ChatBackend 接入"
-    )]
-    async fn cancel_download_task(&self, task_id: &str) -> Result<DownloadTaskData, ChatError> {
+    /// 请求 Node 取消下载任务，并只接受服务端返回的 `cancelled` 快照。
+    ///
+    /// # Examples
+    ///
+    /// 页面取消初始化时传入创建任务接口返回的十进制 `task_id`，成功后再停止本地轮询 Future。
+    ///
+    /// # Notes
+    ///
+    /// 方法不把 HTTP 成功状态伪装成取消成功；任务仍在运行、已完成或响应快照非法都会返回
+    /// `ChatError`。任务 ID 只用于 URL 路径，不接受空值、负数或超出 `i64` 范围的输入。
+    pub(super) async fn cancel_download_task(&self, task_id: &str) -> Result<(), ChatError> {
         let operation = Operation::Initialize(PreparationStage::Downloading);
         if !valid_task_id(task_id) {
             return Err(failure(
@@ -636,6 +642,14 @@ impl CatalogClient {
             .await
             .map_err(|error| transport(error, operation))?;
         let data = decode_download_task(response, operation).await?;
+        validate_download_task_shape(&data)?;
+        if data.task_id != task_id {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "取消接口返回了不匹配的任务快照".into(),
+            ));
+        }
         if data.status != "cancelled" {
             return Err(failure(
                 ErrorKind::InvalidResult,
@@ -643,7 +657,7 @@ impl CatalogClient {
                 "取消接口没有返回 cancelled 任务快照".into(),
             ));
         }
-        Ok(data)
+        Ok(())
     }
 
     async fn poll_download_task(
@@ -696,6 +710,9 @@ impl CatalogClient {
         let initial = self.create_download_task(request).await?;
         let initial = map_download_task(initial, request)?;
         let mut callback = callback;
+        callback(PreparationEvent::DownloadTaskCreated {
+            task_id: initial.task_id.clone(),
+        });
         let mut downloaded_emitted = false;
         let data = match initial.status.as_str() {
             "queued" | "downloading" => {

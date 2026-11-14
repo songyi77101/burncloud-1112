@@ -554,7 +554,9 @@ async fn download_server(status: u16, body: serde_json::Value) -> Server {
                             .flatten()
                     });
                 }
-                if content_length.is_some_and(|length| bytes.len() >= header_end + length) {
+                if content_length.is_none()
+                    || content_length.is_some_and(|length| bytes.len() >= header_end + length)
+                {
                     break;
                 }
             }
@@ -735,6 +737,9 @@ async fn download_model_posts_selected_artifact_and_returns_prepared_model() {
     assert_eq!(
         events,
         vec![
+            PreparationEvent::DownloadTaskCreated {
+                task_id: "7".into(),
+            },
             PreparationEvent::Downloaded,
             PreparationEvent::Verified {
                 expected: DOWNLOAD_DIGEST.into(),
@@ -792,6 +797,9 @@ async fn download_model_polls_progress_and_verification_until_succeeded() {
     assert_eq!(
         events,
         vec![
+            PreparationEvent::DownloadTaskCreated {
+                task_id: "7".into(),
+            },
             PreparationEvent::DownloadProgress {
                 completed: 0,
                 total: Some(10),
@@ -857,6 +865,41 @@ async fn download_model_maps_server_errors_to_chat_errors() {
     }
 }
 
+#[tokio::test]
+async fn cancel_download_task_requires_matching_cancelled_snapshot() {
+    let service = download_server(200, task_response("cancelled", 10, Some(10), None, None)).await;
+    service
+        .client
+        .cancel_download_task("7")
+        .await
+        .expect("取消快照应被接受");
+
+    let service = download_server(
+        200,
+        task_response(
+            "succeeded",
+            10,
+            Some(10),
+            Some("/node/model.gguf"),
+            Some(DOWNLOAD_DIGEST),
+        ),
+    )
+    .await;
+    let error = service
+        .client
+        .cancel_download_task("7")
+        .await
+        .expect_err("非 cancelled 快照不得伪装为取消成功");
+    assert_eq!(error.kind, ErrorKind::InvalidResult);
+
+    let service = download_server(200, task_response("cancelled", 10, Some(10), None, None)).await;
+    let error = service
+        .client
+        .cancel_download_task("8")
+        .await
+        .expect_err("任务身份不匹配必须拒绝");
+    assert_eq!(error.kind, ErrorKind::InvalidResult);
+}
 #[tokio::test]
 async fn download_model_rejects_identity_mismatch_in_success_response() {
     let service = download_server(
