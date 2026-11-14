@@ -218,15 +218,29 @@ async fn responses_are_json_and_not_cacheable() {
     assert_eq!(value["success"], false);
     assert_eq!(value["error"]["code"], "checksum_mismatch");
 
-    let success = success_response(DownloadModelData {
-        status: "verified",
-        model: "Qwen/Qwen3-8B".into(),
-        source: "modelscope",
-        revision: "master".into(),
-        variant_id: "Q4_K_M.gguf".into(),
-        local_path: "/node/models/Q4_K_M.gguf".into(),
-        actual_sha256: CHECKSUM.into(),
-    });
+    let identity = validate_request(request(
+        DownloadSource::ModelScope,
+        "Qwen/Qwen3-8B",
+        "master",
+        "Q4_K_M.gguf",
+        "https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/Q4_K_M.gguf",
+        CHECKSUM,
+    ))
+    .expect("固定任务身份有效");
+    let success = task_response(
+        StatusCode::ACCEPTED,
+        DownloadTaskSnapshot {
+            task_id: 42,
+            identity,
+            status: DownloadTaskState::Succeeded,
+            completed_bytes: 10,
+            total_bytes: Some(10),
+            download_speed: 0,
+            error: None,
+            final_path: Some("/node/models/Q4_K_M.gguf".into()),
+            actual_sha256: Some(CHECKSUM.into()),
+        },
+    );
     assert_eq!(
         success
             .headers()
@@ -238,7 +252,7 @@ async fn responses_are_json_and_not_cacheable() {
         .await
         .expect("成功响应体可读");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("成功响应为 JSON");
-    assert_eq!(value["data"]["status"], "verified");
+    assert_eq!(value["data"]["status"], "succeeded");
 }
 
 #[test]
