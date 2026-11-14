@@ -339,8 +339,8 @@ impl DownloadManager {
     ///
     /// # 注意
     ///
-    /// 这是兼容旧调用方的等待包装；新模型下载接口应使用 `start_download` 与
-    /// `wait_for_task` 分离的异步生命周期。
+    /// 这是兼容旧调用方的等待包装：先调用 `start_download` 登记任务，再调用
+    /// `wait_for_task` 等待同一稳定任务 ID。新模型下载接口应直接使用分离的异步生命周期。
     pub async fn download(&self, url: &str, dir: &str) -> Result<PathBuf> {
         let handle = self.start_download(url, dir).await?;
         self.wait_for_task(handle.task_id).await
