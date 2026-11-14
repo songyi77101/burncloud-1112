@@ -749,3 +749,61 @@ async fn download_model_rejects_identity_mismatch_in_success_response() {
         Operation::Initialize(PreparationStage::Downloading)
     );
 }
+
+#[test]
+fn download_task_mapping_validates_progress_identity_and_terminal_fields() {
+    let request = download_request(DOWNLOAD_DIGEST);
+    let queued = DownloadTaskData {
+        task_id: "7".into(),
+        status: "queued".into(),
+        model: "Qwen/Qwen3-8B".into(),
+        source: "modelscope".into(),
+        revision: "master".into(),
+        variant_id: "Q4_K_M.gguf".into(),
+        completed_bytes: 0,
+        total_bytes: Some(10),
+        download_speed: 0,
+        error: None,
+        local_path: None,
+        actual_sha256: None,
+    };
+    assert_eq!(
+        map_download_task(queued.clone(), &request),
+        Ok(queued.clone())
+    );
+
+    let mut invalid_progress = queued.clone();
+    invalid_progress.completed_bytes = 11;
+    assert!(map_download_task(invalid_progress, &request).is_err());
+
+    let mut invalid_identity = queued;
+    invalid_identity.model = "Other/Model".into();
+    assert!(map_download_task(invalid_identity, &request).is_err());
+
+    let mut missing_success_fields = DownloadTaskData {
+        task_id: "7".into(),
+        status: "succeeded".into(),
+        model: "Qwen/Qwen3-8B".into(),
+        source: "modelscope".into(),
+        revision: "master".into(),
+        variant_id: "Q4_K_M.gguf".into(),
+        completed_bytes: 10,
+        total_bytes: Some(10),
+        download_speed: 0,
+        error: None,
+        local_path: None,
+        actual_sha256: None,
+    };
+    missing_success_fields.actual_sha256 = Some(DOWNLOAD_DIGEST.into());
+    assert!(map_download_task(missing_success_fields, &request).is_err());
+}
+
+#[test]
+fn task_ids_accept_only_decimal_i64_values() {
+    assert!(valid_task_id("1"));
+    assert!(valid_task_id("9223372036854775807"));
+    assert!(!valid_task_id(""));
+    assert!(!valid_task_id("-1"));
+    assert!(!valid_task_id("1x"));
+    assert!(!valid_task_id("9223372036854775808"));
+}

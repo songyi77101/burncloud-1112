@@ -1,8 +1,11 @@
 //! 主服务模型选择、模型解析和下载 HTTP 边界。
 
-use super::model::{
-    valid_digest, ChatError, ErrorKind, Gpu, Hardware, InitializationRequest, ModelResolution,
-    ModelVariant, Operation, Platform, PreparationEvent, PreparationStage, PreparedModel,
+use super::{
+    backend::Callback,
+    model::{
+        valid_digest, ChatError, ErrorKind, Gpu, Hardware, InitializationRequest, ModelResolution,
+        ModelVariant, Operation, Platform, PreparationEvent, PreparationStage, PreparedModel,
+    },
 };
 use reqwest::{Client, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -12,6 +15,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub(super) struct CatalogClient {
     client: Client,
+    download_client: Client,
     base: Url,
 }
 
@@ -106,7 +110,7 @@ struct RemoteAccelerator {
     memory_bytes: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct RemoteHardwareError {
     code: String,
     message: String,
@@ -122,15 +126,49 @@ struct DownloadModelRequest {
     checksum: String,
 }
 
+#[allow(
+    dead_code,
+    reason = "任务接口先于 download_model 编排落地，下一任务接入这些 DTO"
+)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct DownloadTaskData {
+    task_id: String,
+    status: String,
+    model: String,
+    source: String,
+    revision: String,
+    variant_id: String,
+    completed_bytes: u64,
+    total_bytes: Option<u64>,
+    download_speed: u64,
+    error: Option<RemoteHardwareError>,
+    local_path: Option<String>,
+    actual_sha256: Option<String>,
+}
+
+#[allow(dead_code, reason = "固定轮询间隔由下一任务的 download_model 编排使用")]
+const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+#[allow(
+    dead_code,
+    reason = "任务接口先于 download_model 编排落地，下一任务接入响应信封"
+)]
 #[derive(Debug, Deserialize)]
-struct DownloadEnvelope {
+struct DownloadTaskEnvelope {
     success: bool,
-    data: Option<DownloadData>,
+    data: Option<DownloadTaskData>,
     error: Option<RemoteHardwareError>,
 }
 
 #[derive(Debug, Deserialize)]
-struct DownloadData {
+struct LegacyDownloadEnvelope {
+    success: bool,
+    data: Option<LegacyDownloadData>,
+    error: Option<RemoteHardwareError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyDownloadData {
     status: String,
     model: String,
     source: String,
@@ -207,7 +245,7 @@ impl CatalogClient {
                 server_base(&host, port)
             }
         };
-        Self::new(&base, Duration::from_secs(45))
+        Self::with_timeouts(&base, Duration::from_secs(45), Duration::from_secs(10 * 60))
     }
 
     /// 构造目录客户端，拒绝非 HTTP 地址、带认证信息的地址和零超时。
@@ -217,7 +255,19 @@ impl CatalogClient {
     ///
     /// # Notes
     /// 错误配置明确返回错误，不退回旧版独立服务。
+    #[allow(
+        dead_code,
+        reason = "测试注入短超时客户端；生产环境从 from_env 使用专用下载超时"
+    )]
     pub(super) fn new(base: &str, timeout: Duration) -> Result<Self, ChatError> {
+        Self::with_timeouts(base, timeout, timeout)
+    }
+
+    fn with_timeouts(
+        base: &str,
+        timeout: Duration,
+        download_timeout: Duration,
+    ) -> Result<Self, ChatError> {
         let base = Url::parse(base).map_err(|error| {
             failure(
                 ErrorKind::InvalidParameter,
@@ -230,6 +280,7 @@ impl CatalogClient {
             || !base.username().is_empty()
             || base.password().is_some()
             || timeout.is_zero()
+            || download_timeout.is_zero()
         {
             return Err(failure(
                 ErrorKind::InvalidParameter,
@@ -241,7 +292,17 @@ impl CatalogClient {
             .timeout(timeout)
             .build()
             .map_err(|error| transport(error, Operation::Search))?;
-        Ok(Self { client, base })
+        let download_client = Client::builder()
+            .timeout(download_timeout)
+            .build()
+            .map_err(|error| {
+                transport(error, Operation::Initialize(PreparationStage::Downloading))
+            })?;
+        Ok(Self {
+            client,
+            download_client,
+            base: base.clone(),
+        })
     }
 
     /// 空查询加载预置，非空查询逐行发布累计搜索快照。
@@ -534,6 +595,130 @@ impl CatalogClient {
         snapshot.into_hardware()
     }
 
+    #[expect(
+        dead_code,
+        reason = "任务接口先于 download_model 编排落地，下一任务接入创建、轮询和取消方法"
+    )]
+    async fn create_download_task(
+        &self,
+        request: &InitializationRequest,
+    ) -> Result<DownloadTaskData, ChatError> {
+        let operation = Operation::Initialize(PreparationStage::Downloading);
+        let payload = download_request_payload(request, operation)?;
+        let url = self
+            .base
+            .join("/api/node/models/download")
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .download_client
+            .post(url)
+            .header("Accept", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        decode_download_task(response, operation).await
+    }
+
+    #[expect(
+        dead_code,
+        reason = "任务接口先于 download_model 编排落地，下一任务接入创建、轮询和取消方法"
+    )]
+    async fn get_download_task(&self, task_id: &str) -> Result<DownloadTaskData, ChatError> {
+        let operation = Operation::Initialize(PreparationStage::Downloading);
+        if !valid_task_id(task_id) {
+            return Err(failure(
+                ErrorKind::InvalidParameter,
+                operation,
+                "下载任务 ID 无效".into(),
+            ));
+        }
+        let path = format!("/api/node/models/download/{task_id}");
+        let url = self
+            .base
+            .join(&path)
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .download_client
+            .get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        decode_download_task(response, operation).await
+    }
+
+    #[expect(
+        dead_code,
+        reason = "任务接口先于 download_model 编排落地，下一任务接入创建、轮询和取消方法"
+    )]
+    async fn cancel_download_task(&self, task_id: &str) -> Result<DownloadTaskData, ChatError> {
+        let operation = Operation::Initialize(PreparationStage::Downloading);
+        if !valid_task_id(task_id) {
+            return Err(failure(
+                ErrorKind::InvalidParameter,
+                operation,
+                "下载任务 ID 无效".into(),
+            ));
+        }
+        let path = format!("/api/node/models/download/{task_id}");
+        let url = self
+            .base
+            .join(&path)
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .download_client
+            .delete(url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let data = decode_download_task(response, operation).await?;
+        if data.status != "cancelled" {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "取消接口没有返回 cancelled 任务快照".into(),
+            ));
+        }
+        Ok(data)
+    }
+
+    #[expect(
+        dead_code,
+        reason = "任务接口先于 download_model 编排落地，下一任务接入创建、轮询和取消方法"
+    )]
+    async fn poll_download_task(
+        &self,
+        task_id: &str,
+        expected: &InitializationRequest,
+        callback: &mut Callback<PreparationEvent>,
+    ) -> Result<DownloadTaskData, ChatError> {
+        let mut downloaded_emitted = false;
+        loop {
+            let data = self.get_download_task(task_id).await?;
+            let data = map_download_task(data, expected)?;
+            match data.status.as_str() {
+                "queued" | "downloading" => {
+                    callback(PreparationEvent::DownloadProgress {
+                        completed: data.completed_bytes,
+                        total: data.total_bytes,
+                    });
+                }
+                "verifying" => {
+                    emit_downloaded(callback, &mut downloaded_emitted);
+                }
+                "succeeded" => {
+                    emit_downloaded(callback, &mut downloaded_emitted);
+                    return Ok(data);
+                }
+                "failed" | "cancelled" => return Ok(data),
+                _ => unreachable!("map_download_task 已校验任务状态"),
+            }
+            tokio::time::sleep(DOWNLOAD_POLL_INTERVAL).await;
+        }
+    }
+
     /// 在 Node 主服务上下载已确认的目录工件并校验 SHA-256。
     ///
     /// # Examples
@@ -596,7 +781,7 @@ impl CatalogClient {
             .bytes()
             .await
             .map_err(|error| transport(error, operation))?;
-        let envelope: DownloadEnvelope = serde_json::from_slice(&body).map_err(|error| {
+        let envelope: LegacyDownloadEnvelope = serde_json::from_slice(&body).map_err(|error| {
             failure(
                 ErrorKind::InvalidResult,
                 operation,
@@ -948,6 +1133,171 @@ impl<T> CatalogPage<T> {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "创建任务请求构造由下一任务的 download_model 编排调用"
+)]
+fn download_request_payload(
+    request: &InitializationRequest,
+    operation: Operation,
+) -> Result<DownloadModelRequest, ChatError> {
+    let selection = request.model.catalog_selection.as_ref().ok_or_else(|| {
+        failure(
+            ErrorKind::InvalidParameter,
+            operation,
+            "目录模型缺少仓库选择快照".into(),
+        )
+    })?;
+    selection.version.validate().map_err(|error| ChatError {
+        kind: error.kind,
+        operation,
+        reason: error.reason,
+    })?;
+    if !valid_digest(&request.variant.expected_sha256)
+        || request.variant.artifact_source.trim().is_empty()
+    {
+        return Err(failure(
+            ErrorKind::InvalidParameter,
+            operation,
+            "目录模型工件凭据无效".into(),
+        ));
+    }
+    Ok(DownloadModelRequest {
+        model: selection.version.model.clone(),
+        source: selection.version.source.clone(),
+        revision: selection.version.revision.clone(),
+        variant_id: request.variant.id.clone(),
+        artifact_uri: request.variant.artifact_source.clone(),
+        checksum: request.variant.expected_sha256.clone(),
+    })
+}
+
+#[allow(dead_code, reason = "任务响应解码由下一任务的 download_model 编排调用")]
+async fn decode_download_task(
+    response: reqwest::Response,
+    operation: Operation,
+) -> Result<DownloadTaskData, ChatError> {
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| transport(error, operation))?;
+    let envelope: DownloadTaskEnvelope = serde_json::from_slice(&body).map_err(|error| {
+        failure(
+            ErrorKind::InvalidResult,
+            operation,
+            format!("模型下载任务响应格式无效：{error}"),
+        )
+    })?;
+    if !status.is_success() || !envelope.success {
+        let error = envelope.error.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "模型下载失败响应缺少错误信息".into(),
+            )
+        })?;
+        return Err(download_error(error));
+    }
+    envelope.data.ok_or_else(|| {
+        failure(
+            ErrorKind::InvalidResult,
+            operation,
+            "模型下载成功响应缺少任务数据".into(),
+        )
+    })
+}
+
+#[allow(dead_code, reason = "任务 ID 校验由任务接口方法调用")]
+fn valid_task_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<i64>().is_ok()
+}
+
+#[allow(dead_code, reason = "任务快照白盒校验由 map_download_task 调用")]
+fn validate_download_task_shape(data: &DownloadTaskData) -> Result<(), ChatError> {
+    let operation = if data.status == "verifying" || data.status == "succeeded" {
+        Operation::Initialize(PreparationStage::Verifying)
+    } else {
+        Operation::Initialize(PreparationStage::Downloading)
+    };
+    if !valid_task_id(&data.task_id)
+        || !matches!(
+            data.status.as_str(),
+            "queued" | "downloading" | "verifying" | "succeeded" | "failed" | "cancelled"
+        )
+        || data.model.trim().is_empty()
+        || data.source.trim().is_empty()
+        || data.revision.trim().is_empty()
+        || data.variant_id.trim().is_empty()
+        || data
+            .total_bytes
+            .is_some_and(|total| total == 0 || data.completed_bytes > total)
+        || data
+            .local_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty() || path.contains('\0'))
+        || data
+            .actual_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_digest(digest))
+        || (data.status == "succeeded"
+            && (data.local_path.is_none() || data.actual_sha256.is_none()))
+        || (data.status == "failed"
+            && data.error.as_ref().is_none_or(|error| {
+                error.code.trim().is_empty() || error.message.trim().is_empty()
+            }))
+    {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            operation,
+            "模型下载任务响应字段无效".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(dead_code, reason = "任务快照映射由下一任务的 download_model 编排调用")]
+fn map_download_task(
+    data: DownloadTaskData,
+    request: &InitializationRequest,
+) -> Result<DownloadTaskData, ChatError> {
+    validate_download_task_shape(&data)?;
+    let operation = if data.status == "verifying" || data.status == "succeeded" {
+        Operation::Initialize(PreparationStage::Verifying)
+    } else {
+        Operation::Initialize(PreparationStage::Downloading)
+    };
+    let selection = request.model.catalog_selection.as_ref().ok_or_else(|| {
+        failure(
+            ErrorKind::InvalidParameter,
+            operation,
+            "目录模型缺少仓库选择快照".into(),
+        )
+    })?;
+    if data.model != selection.version.model
+        || data.source != selection.version.source
+        || data.revision != selection.version.revision
+        || data.variant_id != request.variant.id
+    {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            operation,
+            "模型下载任务身份与当前选择不一致".into(),
+        ));
+    }
+    Ok(data)
+}
+
+#[allow(dead_code, reason = "轮询完成事件由任务接口方法内部调用")]
+fn emit_downloaded(callback: &mut Callback<PreparationEvent>, emitted: &mut bool) {
+    if !*emitted {
+        callback(PreparationEvent::Downloaded);
+        *emitted = true;
+    }
+}
+
 fn download_error(error: RemoteHardwareError) -> ChatError {
     let operation = if error.code == "checksum_mismatch" || error.code == "download_storage_failed"
     {
@@ -958,7 +1308,10 @@ fn download_error(error: RemoteHardwareError) -> ChatError {
     let kind = match error.code.as_str() {
         "invalid_download_request" => ErrorKind::InvalidParameter,
         "checksum_mismatch" => ErrorKind::VerificationFailed,
-        "download_service_unavailable" | "download_failed" => ErrorKind::ExecutionFailed,
+        "download_service_unavailable"
+        | "download_failed"
+        | "download_task_not_found"
+        | "download_task_not_cancellable" => ErrorKind::ExecutionFailed,
         "download_storage_failed" => ErrorKind::VerificationFailed,
         _ => ErrorKind::InvalidResult,
     };
