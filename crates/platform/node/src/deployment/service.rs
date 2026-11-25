@@ -209,6 +209,9 @@ struct DeploymentCoordinator {
     //   作用：停旧运行时、监控状态查询、防止同一模型重复 spawn 监控。
     monitored: HashMap<String, MonitoredRuntime>,
 
+    // 结算前独占同一模型的停止权，防止替换任务越过正在停止的旧代次。
+    stopping: HashMap<String, StopReservation>,
+
     // 世代号：每次 spawn_monitor 自增。
     //   作用：监控任务退出时判断自己是否“过期”（防止旧任务误删新监控记录）。
     generation: u64,
@@ -306,6 +309,25 @@ struct MonitoredRuntime {
     task: JoinHandle<()>,
 }
 
+struct StopReservation {
+    generation: u64,
+    // 槽位移除时发送端关闭，等候者重新在锁内核对实际代次。
+    settled: watch::Sender<()>,
+}
+
+#[derive(Clone, Copy)]
+enum StopMode {
+    Replacement,
+    ByModel,
+    Exact(u64),
+}
+
+impl StopMode {
+    fn matches(self, generation: u64) -> bool {
+        !matches!(self, Self::Exact(expected) if generation != expected)
+    }
+}
+
 // 停止操作返回的旧运行时上下文，供停止事件携带精确代次和 endpoint。
 struct StoppedRuntime {
     handle: ProcessHandle,
@@ -353,6 +375,7 @@ impl DeploymentService {
             in_flight: HashMap::new(),
             // 空监控表。
             monitored: HashMap::new(),
+            stopping: HashMap::new(),
             // 世代号从 0 开始。
             generation: 0,
             // worker 句柄稍后填入。
@@ -584,28 +607,57 @@ impl DeploymentService {
             ));
         }
 
-        let stopped = Self::stop_old_runtime(Arc::clone(&self.inner), model_id).await?;
-        let was_stopped = stopped.is_some();
-        if let Some(stopped) = stopped {
-            let event = DeploymentEvent {
-                model_id: model_id.to_string(),
-                kind: DeploymentEventKind::Stopped,
-                state: Some(NodeState::Absent),
-                error_kind: None,
-                local_endpoint: Some(stopped.plan.local_endpoint),
-                pid: Some(stopped.handle.pid),
-                error: None,
-                cleanup_error: None,
-                generation: stopped.generation,
-                capacity: None,
-            };
-            if let Err(error) =
-                Self::publish_with_retry(self.inner.event_publisher.as_ref(), event).await
-            {
-                tracing::error!(%error, model_id, "runtime stopped but stop event could not be published");
-            }
+        Self::stop_old_runtime(Arc::clone(&self.inner), model_id, StopMode::ByModel)
+            .await
+            .map(|stopped| stopped.is_some())
+    }
+
+    /// 停止指定模型的一个精确受管进程代次。
+    ///
+    /// 匹配且停止成功返回 `true`；没有受监控进程或已经换代返回 `false`，
+    /// 不会停止新代次。应使用部署事件中的代次，而不是操作系统 PID。
+    /// 已取得停止槽位的操作即使调用方取消等待，也会继续结算。
+    ///
+    /// # Errors
+    ///
+    /// 模型标识为空白或代次为零时返回 `InvalidRequest`；停止前的进度发布失败
+    /// 返回 `EventPublishFailed`；进程停止失败返回 `OldRuntimeStopFailed`，
+    /// 仍存活的进程继续使用原代次接受监控。进程已停止后若终态事件发布失败，
+    /// 仅记录日志，不改变停止结果。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use burncloud_node_runtime::deployment::{DeploymentError, DeploymentService};
+    ///
+    /// async fn stop_owned(
+    ///     service: &DeploymentService,
+    ///     generation: u64,
+    /// ) -> Result<bool, DeploymentError> {
+    ///     service.stop_model_generation("local-model", generation).await
+    /// }
+    /// ```
+    pub async fn stop_model_generation(
+        &self,
+        model_id: &str,
+        generation: u64,
+    ) -> Result<bool, DeploymentError> {
+        let model_id = model_id.trim();
+        if model_id.is_empty() || generation == 0 {
+            return Err(deployment_error(
+                DeploymentErrorKind::InvalidRequest,
+                "model_id must not be empty and generation must be non-zero".to_string(),
+                None,
+            ));
         }
-        Ok(was_stopped)
+
+        Self::stop_old_runtime(
+            Arc::clone(&self.inner),
+            model_id,
+            StopMode::Exact(generation),
+        )
+        .await
+        .map(|stopped| stopped.is_some())
     }
 
     // ------------------------------------------------------------------------
@@ -687,7 +739,8 @@ impl DeploymentService {
         //    失败时（如停旧失败）直接返回错误，不继续启新。
         //    ? 运算符：错误直接冒泡。
         let preserved_runtime =
-            Self::stop_old_runtime(Arc::clone(&inner), &request.model_id).await?;
+            Self::stop_old_runtime(Arc::clone(&inner), &request.model_id, StopMode::Replacement)
+                .await?;
         let preserved_state = preserved_runtime.as_ref().map(|runtime| runtime.state);
         // 在停止旧实例后立即分配新代次，使本次部署的所有运行时相关事件都能被旧事件过滤。
         let generation = reserve_generation(Arc::clone(&inner)).await;
@@ -935,112 +988,207 @@ impl DeploymentService {
         })
     }
 
-    // ------------------------------------------------------------------------
-    // 停止旧运行时（若存在），返回其状态用于“保留状态”
-    // ------------------------------------------------------------------------
     async fn stop_old_runtime(
-        // 共享 Inner。
         inner: Arc<DeploymentServiceInner>,
-        // 模型标识。
         model_id: &str,
+        mode: StopMode,
     ) -> Result<Option<StoppedRuntime>, DeploymentError> {
-        // 先查该模型是否已有受监控运行时（持锁时间短，只做查询）。
-        let previous = {
-            // 拿锁。
-            let coordinator = inner.coordinator.lock().await;
-            // 查 monitored。
-            coordinator
+        let stopping_event = loop {
+            let mut coordinator = inner.coordinator.lock().await;
+            if let Some(stopping) = coordinator.stopping.get(model_id) {
+                if !mode.matches(stopping.generation) {
+                    return Ok(None);
+                }
+                let mut settled = stopping.settled.subscribe();
+                drop(coordinator);
+                // 等待发送端关闭才表示槽位已移除；等候期间不持有全局锁。
+                while settled.changed().await.is_ok() {}
+                continue;
+            }
+
+            let Some(runtime) = coordinator
                 .monitored
                 .get(model_id)
-                // 拷贝出 (state, plan, handle)，避免持锁做后续异步操作。
-                .map(|runtime| {
-                    (
-                        runtime.state,
-                        runtime.plan.clone(),
-                        runtime.handle,
-                        runtime.generation,
-                    )
-                })
-        };
-        // 没有旧运行时：直接返回 None（表示无 preserved_state）。
-        let Some((state, plan, handle, previous_generation)) = previous else {
-            return Ok(None);
+                .filter(|runtime| mode.matches(runtime.generation))
+            else {
+                return Ok(None);
+            };
+            let event = DeploymentEvent {
+                model_id: model_id.to_string(),
+                kind: DeploymentEventKind::Progress(DeploymentStage::StoppingOldRuntime),
+                state: Some(runtime.state),
+                error_kind: None,
+                local_endpoint: Some(runtime.plan.local_endpoint.clone()),
+                pid: Some(runtime.handle.pid),
+                error: None,
+                cleanup_error: None,
+                generation: runtime.generation,
+                capacity: None,
+            };
+            // 在同一次代次核对中取得独占槽位；进度发布失败前旧监控仍正常工作。
+            coordinator.stopping.insert(
+                event.model_id.clone(),
+                StopReservation {
+                    generation: event.generation,
+                    settled: watch::Sender::new(()),
+                },
+            );
+            break event;
         };
 
-        // 发布 StoppingOldRuntime 进度事件（带旧 state/plan/pid）。
-        let stopping_event = DeploymentEvent {
-            model_id: model_id.to_string(),
-            kind: DeploymentEventKind::Progress(DeploymentStage::StoppingOldRuntime),
-            state: Some(state),
-            error_kind: None,
-            local_endpoint: Some(plan.local_endpoint.clone()),
-            pid: Some(handle.pid),
-            error: None,
-            cleanup_error: None,
-            generation: previous_generation,
-            capacity: None,
-        };
-        // 发布事件（失败重试一次）。
-        if let Err(error) =
-            Self::publish_with_retry(inner.event_publisher.as_ref(), stopping_event).await
-        {
-            // 事件发布失败：保留旧状态并返回错误（旧运行时保持不动，可重试）。
-            return Err(event_publish_error(error, Some(state)));
-        }
+        // 取得槽位后不经过任何可取消的等待就移交给独立任务，避免调用方丢下句柄或槽位。
+        let model_id = model_id.to_string();
+        tokio::spawn(async move {
+            let result = Self::stop_reserved_runtime(&inner, &model_id, stopping_event, mode).await;
+            inner.coordinator.lock().await.stopping.remove(&model_id);
+            result
+        })
+        .await
+        .map_err(|error| {
+            deployment_error(
+                DeploymentErrorKind::OldRuntimeStopFailed,
+                error.to_string(),
+                None,
+            )
+        })?
+    }
 
-        // 从 monitored 中移除旧运行时（拿到所有权，便于取消任务与停止进程）。
-        let Some(runtime) = inner.coordinator.lock().await.monitored.remove(model_id) else {
-            // 极端竞态：查询与移除之间被别的路径移除，直接返回 None。
-            return Ok(None);
+    async fn stop_reserved_runtime(
+        inner: &Arc<DeploymentServiceInner>,
+        model_id: &str,
+        stopping_event: DeploymentEvent,
+        mode: StopMode,
+    ) -> Result<Option<StoppedRuntime>, DeploymentError> {
+        let expected = stopping_event.generation;
+        let published =
+            Self::publish_with_retry(inner.event_publisher.as_ref(), stopping_event).await;
+        let runtime = {
+            let mut coordinator = inner.coordinator.lock().await;
+            let current = coordinator
+                .monitored
+                .get(model_id)
+                .filter(|runtime| runtime.generation == expected);
+            if let Err(error) = published {
+                return Err(event_publish_error(
+                    error,
+                    current.map(|runtime| runtime.state),
+                ));
+            }
+            // 原监控可能已经自行结算退出；比较代次和移走监控句柄必须同时完成。
+            if current.is_none() {
+                return Ok(None);
+            }
+            coordinator.monitored.remove(model_id)
         };
-        // 解构出各字段。
-        let MonitoredRuntime {
+        let Some(MonitoredRuntime {
             handle,
             plan,
             state,
             generation,
             cancel,
             task,
-        } = runtime;
-        // 取消旧监控任务。
+        }) = runtime
+        else {
+            return Ok(None);
+        };
         cancel.send_replace(true);
-        // 等它退出（失败仅告警，不影响后续停进程流程）。
         if let Err(error) = task.await {
             tracing::warn!(%error, model_id, "old runtime monitor task stopped unexpectedly");
         }
 
-        // 停止旧进程。
-        match inner.process_manager.stop(handle).await {
-            // 停止成功：返回旧运行时上下文，供调用方发布精确停止事件。
-            Ok(()) => Ok(Some(StoppedRuntime {
-                handle,
-                plan,
-                state,
-                generation,
-            })),
-            // 停止失败：重新挂回监控（保持可观测，避免“失联”的运行时），
-            // 然后返回 OldRuntimeStopFailed 错误（带 preserved_state=Some(state)）。
-            Err(error) => {
-                // 重新挂监控。
-                let generation = reserve_generation(Arc::clone(&inner)).await;
-                Self::spawn_monitor(
-                    Arc::clone(&inner),
-                    model_id.to_string(),
-                    plan,
+        let runtime = StoppedRuntime {
+            handle,
+            plan,
+            state,
+            generation,
+        };
+        if let Err(error) = inner.process_manager.stop(handle).await {
+            return Err(Self::recover_failed_stop(inner, model_id, runtime, error).await);
+        }
+        if !matches!(mode, StopMode::Replacement) {
+            Self::publish_stopped(inner.event_publisher.as_ref(), model_id, &runtime).await;
+        }
+        Ok(Some(runtime))
+    }
+
+    async fn publish_stopped(
+        publisher: &dyn DeploymentEventPublisher,
+        model_id: &str,
+        runtime: &StoppedRuntime,
+    ) {
+        let generation = runtime.generation;
+        let event = DeploymentEvent {
+            model_id: model_id.to_string(),
+            kind: DeploymentEventKind::Stopped,
+            state: Some(NodeState::Absent),
+            error_kind: None,
+            local_endpoint: Some(runtime.plan.local_endpoint.clone()),
+            pid: Some(runtime.handle.pid),
+            error: None,
+            cleanup_error: None,
+            generation,
+            capacity: None,
+        };
+        // 延续旧入口语义：事件发布失败不会把已停止的进程报告成停止失败。
+        if let Err(error) = Self::publish_with_retry(publisher, event).await {
+            tracing::error!(%error, model_id, generation, "runtime stopped but stop event could not be published");
+        }
+    }
+
+    async fn recover_failed_stop(
+        inner: &Arc<DeploymentServiceInner>,
+        model_id: &str,
+        runtime: StoppedRuntime,
+        error: crate::ProcessError,
+    ) -> DeploymentError {
+        let mut failure = deployment_error(
+            DeploymentErrorKind::OldRuntimeStopFailed,
+            error.to_string(),
+            None,
+        );
+        let StoppedRuntime {
+            handle,
+            plan,
+            state,
+            generation,
+        } = runtime;
+        match inner.process_manager.is_running(handle).await {
+            Ok(false) => {
+                // 停止命令可能报错但进程已经退出，不能把已退出的代次报成仍就绪。
+                let event = monitor_state_event(
+                    model_id,
+                    &plan,
                     handle,
-                    state,
+                    NodeState::Failed,
                     generation,
+                    Some(DeploymentErrorKind::ProcessExited),
+                    Some("runtime process exited during stop".to_string()),
                     None,
-                )
-                .await;
-                // 返回错误。
-                Err(deployment_error(
-                    DeploymentErrorKind::OldRuntimeStopFailed,
-                    error.to_string(),
-                    Some(state),
-                ))
+                );
+                if let Err(error) =
+                    Self::publish_with_retry(inner.event_publisher.as_ref(), event).await
+                {
+                    failure.notification_error = Some(error.to_string());
+                }
+                return failure;
+            }
+            Ok(true) => failure.preserved_state = Some(state),
+            Err(error) => {
+                // 暂时无法判定存活时保留归属和监控，但不声称旧状态已被证实。
+                tracing::warn!(%error, model_id, generation, "runtime liveness unknown after failed stop");
             }
         }
+        Self::spawn_monitor(
+            Arc::clone(inner),
+            model_id.to_string(),
+            plan,
+            handle,
+            state,
+            generation,
+            None,
+        )
+        .await;
+        failure
     }
 
     // ------------------------------------------------------------------------

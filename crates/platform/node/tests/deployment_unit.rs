@@ -4,6 +4,9 @@
     reason = "测试断言失败时需要立即暴露场景错误。"
 )]
 
+#[path = "deployment_unit/generation_stop.rs"]
+mod generation_stop;
+
 #[path = "support/deployment.rs"]
 mod support;
 
