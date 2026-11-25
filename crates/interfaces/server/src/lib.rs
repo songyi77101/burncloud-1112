@@ -5,6 +5,16 @@ pub mod api;
 pub mod logging;
 // 本地路由配置与启动生命周期管理保持私有，避免绕过服务启动校验。
 mod local_routes;
+#[allow(
+    dead_code,
+    reason = "本机部署仓储由后续部署执行任务接入；本任务先固定持久化契约和 CAS 边界"
+)]
+mod model_deployment;
+#[allow(
+    dead_code,
+    reason = "本机部署仓储由后续部署执行任务接入；本任务先固定持久化契约和 CAS 边界"
+)]
+mod model_deployment_store;
 mod model_selection;
 pub mod node_attachment;
 // 声明 node_deployment 子模块（私有，仅本模块可见）：节点部署状态管理（前面分析过的 DeploymentEventStore / NodeDeploymentState）
