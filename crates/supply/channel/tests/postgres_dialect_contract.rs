@@ -327,6 +327,21 @@ async fn channel_create_returns_the_postgres_id_and_round_trips_quoted_columns()
         assert_eq!(stored.priority, 9);
         assert_eq!(stored.tpm_cap, Some(200_000));
         assert_eq!(stored.api_version.as_deref(), Some("2024-02-01"));
+        assert_eq!(stored.reservation_green, Some(0.5));
+        assert!(
+            (stored.reservation_yellow.unwrap_or_default() - 0.3).abs() < 0.000001,
+            "PostgreSQL REAL values must decode to f64 without loss beyond float4 precision"
+        );
+        let page = ChannelProviderModel::list(&db, 100, 0)
+            .await
+            .expect("PostgreSQL list must decode REAL columns");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, id);
+        let by_ids = ChannelProviderModel::list_by_ids(&db, &[id])
+            .await
+            .expect("PostgreSQL list_by_ids must decode REAL columns");
+        assert_eq!(by_ids.len(), 1);
+        assert_eq!(by_ids[0].id, id);
 
         let abilities = burncloud_supply_channel::ChannelAbilityModel::list_by_channel(&db, id)
             .await
@@ -336,6 +351,16 @@ async fn channel_create_returns_the_postgres_id_and_round_trips_quoted_columns()
         assert_eq!(abilities.len(), 1);
         assert_eq!(abilities[0].group, "pg-vip");
         assert_eq!(abilities[0].model, "claude-pg-contract");
+        let enabled_models =
+            burncloud_supply_channel::ChannelAbilityModel::list_distinct_models(&db)
+                .await
+                .expect("PostgreSQL BOOLEAN enabled predicate must execute");
+        assert!(
+            enabled_models
+                .iter()
+                .any(|model| model == "claude-pg-contract"),
+            "enabled channel model must be discoverable on PostgreSQL"
+        );
     })
     .await;
 }
