@@ -122,6 +122,10 @@ const MIGRATIONS_SQLITE: &[Migration] = &[
         version: "0020_download_model_identity",
         sql: MODEL_DOWNLOAD_IDENTITY,
     },
+    Migration {
+        version: "0020_local_model_deployments",
+        sql: include_str!("../../migrations/sqlite/0020_local_model_deployments.sql"),
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -208,6 +212,10 @@ const MIGRATIONS_POSTGRES: &[Migration] = &[
     Migration {
         version: "0020_download_model_identity",
         sql: MODEL_DOWNLOAD_IDENTITY,
+    },
+    Migration {
+        version: "0020_local_model_deployments",
+        sql: include_str!("../../migrations/postgres/0020_local_model_deployments.sql"),
     },
 ];
 
@@ -374,3 +382,6 @@ mod tests {
         assert!(migration_statements("-- comment; only\n; ;\n-- another").is_empty());
     }
 }
+
+#[cfg(test)]
+mod local_deployments_tests;
