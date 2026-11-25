@@ -336,3 +336,23 @@ async fn repeated_requests_claim_only_one_verifier() {
         DownloadTaskState::Verifying
     );
 }
+
+#[test]
+fn native_transfer_errors_use_the_existing_redacted_download_error() {
+    let request = reqwest::Client::new()
+        .get("https://example.invalid/model.gguf?signature=secret")
+        .header("Range", "invalid\nvalue")
+        .build();
+    let Err(error) = request else {
+        panic!("测试应生成包含下载地址的请求构造错误");
+    };
+    let download_errors = [
+        DownloadError::from(error),
+        DownloadError::from(std::io::Error::other("包含敏感本地路径")),
+    ];
+    for error in download_errors {
+        let task_error = task_error_from_download(&error);
+        assert_eq!(task_error.code, "download_failed");
+        assert_eq!(task_error.message, "模型文件下载失败");
+    }
+}

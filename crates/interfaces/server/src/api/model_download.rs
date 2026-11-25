@@ -677,9 +677,10 @@ fn task_error_from_download(error: &DownloadError) -> TaskError {
         DownloadError::Failed(message) if !message.is_empty() => {
             ("download_failed", message.clone())
         }
-        DownloadError::Aria2(_) | DownloadError::Failed(_) => {
-            ("download_failed", "模型文件下载失败".to_string())
-        }
+        DownloadError::Aria2(_)
+        | DownloadError::Transport(_)
+        | DownloadError::Io(_)
+        | DownloadError::Failed(_) => ("download_failed", "模型文件下载失败".to_string()),
         DownloadError::TaskNotFound
         | DownloadError::NotificationClosed
         | DownloadError::Database(_)
