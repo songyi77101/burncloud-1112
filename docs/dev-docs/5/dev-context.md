@@ -4,7 +4,7 @@
 
 - 开发序号：5
 - 分支名：codex/local-model-auto-deploy
-- 项目根目录：E:/project/burncloud1.1
+- 项目根目录：E:/project/burncloud1.2
 - 已确认 Issue：https://github.com/songyi77101/burncloud-1112/issues/13
 
 ## 工作区
@@ -22,3 +22,4 @@
 | project-root | 读写 | . |
 
 根工作区只允许 Cargo.toml、Cargo.lock、README.md 及本次开发文档；不覆盖用户未跟踪的 server/docs/hardware-model-resolution-api.md，不写 .env、系统配置或用户现有 llama.cpp。
+
