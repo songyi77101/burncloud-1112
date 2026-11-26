@@ -23,7 +23,7 @@ pub(super) struct BackendHandle(pub(super) Rc<dyn ChatBackend>);
 struct GenerationTask(Signal<Option<Task>>);
 
 #[derive(Clone, Copy)]
-struct PreparationTask(Signal<Option<Task>>);
+struct PreparationTask(Signal<Option<(u64, Task)>>);
 
 #[derive(Clone, Copy)]
 struct ChatScope(ScopeId);
@@ -56,16 +56,19 @@ pub fn ChatHome() -> Element {
     let mut state = use_signal(|| try_consume_context::<ChatState>().unwrap_or_default());
     let task = use_signal(|| None::<Task>);
     use_context_provider(|| GenerationTask(task));
-    let mut preparation_task = use_signal(|| None::<Task>);
+    let mut preparation_task = use_signal(|| None::<(u64, Task)>);
     use_context_provider(|| PreparationTask(preparation_task));
     use_effect(move || {
-        let running = state
+        let active = state
             .read()
             .preparation()
-            .is_some_and(|p| p.stage.is_running());
-        if !running && preparation_task.peek().is_some() {
-            let handle = preparation_task.take();
-            if let Some(handle) = handle {
+            .and_then(|p| p.stage.is_running().then_some(p.run_id));
+        let stale = preparation_task
+            .peek()
+            .as_ref()
+            .is_some_and(|(id, _)| Some(*id) != active);
+        if stale {
+            if let Some((_, handle)) = preparation_task.take() {
                 handle.cancel();
             }
         }
@@ -289,6 +292,19 @@ fn ModelSelector(state: Signal<ChatState>, selected_model: Option<ChatModel>) ->
     }
 }
 
+fn route_status_label(status: &str) -> &'static str {
+    match status {
+        "routable" => "模型已部署，可路由",
+        "unroutable" => "模型已启动，等待 Router 准入",
+        "saturated" => "模型运行中，当前容量已满",
+        "quarantined" | "lost" => "模型暂不可路由，需要重新挂载或恢复",
+        "detaching" => "模型正在停止新请求并清理挂载",
+        "detached" => "模型已完成摘除",
+        "failed" => "模型部署或运行时失败",
+        _ => "Router 状态未知",
+    }
+}
+
 #[component]
 fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Element {
     let run_id = preparation.run_id;
@@ -358,13 +374,26 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
         .variant()
         .map(|variant| variant.expected_sha256.clone())
         .unwrap_or_default();
-    let progress = preparation.progress();
+    let progress = if stage == PreparationStage::Detecting {
+        preparation.progress().map(f64::from)
+    } else {
+        preparation.progress_ratio()
+    };
     let variants: Vec<_> = preparation
         .model
         .variants
         .iter()
         .filter(|variant| variant.fits(hardware))
-        .cloned()
+        .map(|v| {
+            (
+                v.clone(),
+                preparation
+                    .model
+                    .catalog_selection
+                    .as_ref()
+                    .is_some_and(|s| s.version.verified_path(v).is_some()),
+            )
+        })
         .collect();
     let platform = hardware
         .platform
@@ -382,7 +411,14 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
             }
             if let Some(selection) = preparation.model.catalog_selection.as_ref() {
                 p { class: "chat-preparation-note", "{selection.name} · {selection.version.source} · {selection.version.model} · {selection.version.revision}" }
-                p { class: "chat-preparation-note", "硬件检测、模型下载和 SHA-256 摘要校验由 Node 服务完成；文件尚未部署。" }
+                p { class: "chat-preparation-note", match stage {
+                    PreparationStage::ArtifactReady => "模型文件已下载并完成校验，尚未部署。",
+                    PreparationStage::Deploying => "模型文件已校验，正在部署。",
+                    PreparationStage::HealthChecking => "模型已部署，正在检查健康状态。",
+                    PreparationStage::Ready => "模型已部署并就绪。",
+                    PreparationStage::Failed => "模型下载、校验或部署失败。",
+                    _ => "硬件检测、模型下载和 SHA-256 摘要校验由 Node 服务完成。",
+                } }
             }
             if !preparation.collapsed {
                 if stage != PreparationStage::AwaitingStart {
@@ -402,13 +438,13 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
                     div { class: "chat-preparation-progress",
                         if let Some(percent) = progress {
                             progress { max: 100, value: percent, aria_label: format!("进度：{}", stage.label()) }
-                            span { "{percent}%" }
-                        } else { progress { aria_label: "下载进行中" } span { "进行中" } }
+                            span { if stage == PreparationStage::Downloading { "{percent:.1}% · {preparation.completed_bytes} B" } else { "{percent:.0}%" } }
+                        } else { progress { aria_label: "下载进行中" } span { "已接收 {preparation.completed_bytes} B" } }
                     }
                 }
                 if stage == PreparationStage::SelectingVariant {
                     div { class: "chat-variant-list", aria_label: "符合硬件要求的量化版本",
-                        for variant in variants {
+                        for (variant, downloaded) in variants {
                             button {
                                 class: "chat-variant", r#type: "button", disabled: !active,
                                 onclick: move |_| {
@@ -426,7 +462,7 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
                                         " · 磁盘 {gib(variant.disk_bytes)} GiB"
                                     }
                                 }
-                                span { "下载此版本" }
+                                span { if downloaded { "使用已下载版本" } else { "下载此版本" } }
                             }
                         }
                     }
@@ -448,13 +484,18 @@ fn PreparationCard(preparation: Preparation, state: Signal<ChatState>) -> Elemen
                 } else if stage == PreparationStage::Failed {
                     p { class: "chat-preparation-note", "Node 文件路径：空；不会继续后续阶段。" }
                 }
+                if stage == PreparationStage::Ready {
+                    if let Some(route_status) = preparation.route_status.as_deref() {
+                        p { class: "chat-preparation-note", "Router：{route_status_label(route_status)}" }
+                    }
+                }
             }
             if active {
                 div { class: "chat-preparation-actions",
-                    if matches!(stage, PreparationStage::Downloading | PreparationStage::Verifying) {
+                    if matches!(stage, PreparationStage::Downloading | PreparationStage::Verifying | PreparationStage::ArtifactReady | PreparationStage::Deploying | PreparationStage::HealthChecking) {
                         button { class: "chat-flow-button", r#type: "button",
                             onclick: move |_| cancel_preparation(state, run_id),
-                            "取消下载"
+                            if matches!(stage, PreparationStage::Downloading | PreparationStage::Verifying) { "取消下载" } else { "取消部署" }
                         }
                     }
                     if matches!(stage, PreparationStage::AwaitingStart | PreparationStage::Failed | PreparationStage::Cancelled) && preparation.model.catalog_selection.is_none() && !state.read().is_model_ready(preparation.model.id()) {
@@ -737,25 +778,30 @@ fn cancel_preparation(mut state: Signal<ChatState>, run_id: u64) {
     }
     let task_id = state.with_mut(|value| value.request_preparation_cancel(run_id));
     let mut preparation_task = consume_context::<PreparationTask>().0;
-    let local_task = preparation_task.take();
-    let backend = consume_context::<BackendHandle>().0;
-    let owner = consume_context::<ChatScope>().0;
-    Runtime::current().spawn(owner, async move {
-        if let Some(task_id) = task_id {
+    if preparation_task
+        .peek()
+        .as_ref()
+        .is_some_and(|(id, _)| *id == run_id)
+    {
+        if let Some((_, local_task)) = preparation_task.take() {
+            local_task.cancel();
+        }
+    }
+    if let Some(task_id) = task_id {
+        let backend = consume_context::<BackendHandle>().0;
+        let owner = consume_context::<ChatScope>().0;
+        Runtime::current().spawn(owner, async move {
             if let Err(error) = backend.cancel_download_task(task_id).await {
                 state.with_mut(|value| value.finish_preparation_cancellation(run_id, error));
             }
-        }
-        if let Some(local_task) = local_task {
-            local_task.cancel();
-        }
-    });
+        });
+    }
 }
 fn spawn_preparation(mut state: Signal<ChatState>, run_id: u64) {
     let backend = consume_context::<BackendHandle>().0;
     let mut task = consume_context::<PreparationTask>().0;
     let previous = task.take();
-    if let Some(previous) = previous {
+    if let Some((_, previous)) = previous {
         previous.cancel();
     }
     let owner = consume_context::<ChatScope>().0;
@@ -798,16 +844,40 @@ fn spawn_preparation(mut state: Signal<ChatState>, run_id: u64) {
             if let Some(request) = request {
                 let callback =
                     move |event| state.with_mut(|value| value.preparation_event(run_id, event));
-                let result = backend.initialize(request, Box::new(callback)).await;
-                if let Some(plan) = state.with_mut(|value| value.finish_preparation(run_id, result))
-                {
+                let is_catalog = request.model.catalog_selection.is_some();
+                let result = backend
+                    .initialize(request.clone(), Box::new(callback))
+                    .await;
+                let plan = match result {
+                    Ok(prepared) if is_catalog => {
+                        if state.with_mut(|value| value.begin_catalog_deployment(run_id, &prepared))
+                        {
+                            let result = backend
+                                .deploy_catalog_model(request.clone(), prepared.clone())
+                                .await;
+                            state.with_mut(|value| {
+                                value.finish_catalog_deployment(
+                                    run_id,
+                                    prepared,
+                                    result.map(|_| ()),
+                                )
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    other => state.with_mut(|value| value.finish_preparation(run_id, other)),
+                };
+                if let Some(plan) = plan {
                     spawn_stream(state, plan);
                 }
             }
         }
-        task.set(None);
+        if task.peek().as_ref().is_some_and(|(id, _)| *id == run_id) {
+            task.take();
+        }
     });
-    task.set(Some(handle));
+    task.set(Some((run_id, handle)));
 }
 
 fn spawn_stream(mut state: Signal<ChatState>, plan: GenerationPlan) {
@@ -868,3 +938,7 @@ fn copy_message(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "page_task_tests.rs"]
+mod task_tests;

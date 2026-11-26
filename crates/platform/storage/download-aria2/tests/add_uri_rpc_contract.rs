@@ -36,6 +36,16 @@
 //! `options` slot. #893 carries the analysis and the fix in `src/rpc.rs`; the test now pins the
 //! array form and asserts that the `None` and `Some` branches agree on it.
 //!
+//! ## A corrected assertion (#893)
+//!
+//! The `Created` test originally asserted that the URIs travel as **scalar** positional parameters.
+//! That was wrong, and correcting it matters more than the usual "fix the test": this file is the
+//! only place that reads the `add_uri` request off the wire, so an assertion here is what future
+//! work will trust. aria2's signature is `addUri([secret], uris[, options[, position]])`, so the
+//! URI list is **one array parameter**; the scalar form additionally pushed the second URI into the
+//! `options` slot. #893 carries the analysis and the fix in `src/rpc.rs`; the test now pins the
+//! array form and asserts that the `None` and `Some` branches agree on it.
+//!
 //! Why the server is scripted rather than "answer whatever comes": `add_uri` calls `tellActive`
 //! first, and only calls `aria2.addUri` when nothing matched. A server that always answered the
 //! same way could not distinguish "the duplicate check ran and passed" from "the duplicate check

@@ -1,577 +1,155 @@
-# 硬件检测 → 外部模型解析前端接口
+# 模型目录、工件状态与 Node 硬件解析接口
 
-本文档描述当前代码中“模型选择 → Node 硬件检测 → 外部仓库工件解析 → 量化版本筛选”的接口契约。
+本文档记录当前服务端实现及 OpenAPI（`GET /api-docs/openapi.json`）所描述的模型选择接口。模型列表、状态检查、解析候选是不同阶段：仓库页面 URL 仅用于浏览，只有验证过身份、直接文件 URL、SHA-256 和非零文件大小的 GGUF 工件才能成为远程候选。
 
-## 1. 当前实现结论
+## 流程与身份
 
-当前服务端**不再内置默认 Model Manifest 模型数据**。以下三个模型已经从 `burncloud-supply-model` 的默认清单删除：
+1. `GET /api/models/presets` 返回完整的 388 项预置目录。精选的 18 项只是前端默认展示规则，服务端不裁剪目录。
+2. `GET /api/models/search?q=...` 保留外部搜索，非预置结果继续以 `model + source + revision` 作为身份。
+3. `GET /api/models/status` 实时检查所选身份的 GGUF 工件，并附带精确匹配的本地校验记录。
+4. `POST /api/node/models/resolve` 发现并校验工件、重新检测 Node 硬件，再返回符合最低硬件要求的候选。目录预置请求须携带对应 `preset_id`；旧版非预置搜索请求可省略。
 
-- `qwen2.5:1.5b`
-- `qwen2.5:3b`
-- `llama3.2:1b`
+一个模型身份由 `model`、`source`、`revision` 共同构成。同一仓库可以被多个目录项引用；预置模型另外使用唯一 `preset_id` 绑定到具体目录项和硬件门槛。
 
-`load_default_manifests()` 仍保留为兼容入口，但返回空数组。模型解析不再读取这三个模型，而是使用前端模型选择器中用户当前确认的完整仓库身份：
+## 通用值与安全边界
 
-```json
-{
-  "model": "Qwen/Qwen3-8B",
-  "source": "modelscope",
-  "revision": "master"
-}
-```
+| 项目 | 契约 |
+| --- | --- |
+| `source` | `modelscope`、`hf-mirror`、`huggingface`；不接受请求方任意指定站点主机 |
+| `identity_status` | `verified` 或 `pending_validation`；待校验项允许展示，但不能生成成功下载候选 |
+| 目录硬件容量 | 字符串中的 `G` 按 GiB（1024³ 字节）解释；推荐值只供展示 |
+| 远程 GGUF | 路径须为 `.gguf`；仓库及修订号须与选择身份一致；须有来源允许的直接文件 URL、64 位十六进制 SHA-256 和大于零的文件大小 |
+| `resource_url` | ModelScope/Hugging Face 仓库页面，只供查看；不得传给下载器作为工件 URL |
+| 解析硬件 | 使用本次请求中由 Node 检测的 RAM、磁盘及加速器数据；不接受前端硬件值覆盖 |
+| 硬件门槛 | VRAM 为 `max(预置最低值, 工件最低值)`；RAM 和磁盘分别为 `max(预置最低值, 工件最低值, 文件实际大小)` |
+| 本地回退 | 仅当上游不可用时考虑；模型、来源、修订号、Variant ID、工件 URI、期望摘要须完全匹配，且下载记录成功、路径非空、实测摘要等于期望摘要 |
 
-服务端在一次解析请求内完成：
+## `GET /api/models/presets`
 
-1. 校验 `model/source/revision`；
-2. 从 ModelScope、Hugging Face 镜像或 Hugging Face 发现仓库文件；
-3. 只保留 `.gguf` 文件；
-4. 从文件名提取量化标签、文件大小和 SHA-256；
-5. 检测运行 BurnCloud Server/Node 的服务端主机硬件；
-6. 使用 `llama.cpp` Runtime 能力过滤兼容 Variant；
-7. 返回全部兼容量化版本，交给前端选择。
+返回 JSON 数组，恰好 388 项；每个 `id` 唯一。服务器保留全目录，前端根据稳定 ID 按以下顺序默认显示精选项，其余项可通过“显示更多”查看：
 
-## 2. 模型列表来源
+`qwen3-8b`、`deepseek-r1-distill-qwen-7b`、`meta-llama-3.1-8b-instruct`、`gemma-3-4b-it`、`mistral-7b-instruct-v0.2`、`gpt-oss-20b`、`phi-4-mini-reasoning`、`granite-3.3-8b-instruct`、`c4ai-command-r7b-12-2024`、`qwen3-30b`、`deepseek-r1-distill-qwen-32b`、`meta-llama-3.1-70b-instruct`、`gemma-3-27b-it`、`gpt-oss-120b`、`c4ai-command-r-plus`、`nvidia-nemotron-3-super-120b-a12b-bf16`、`olmo-3.1-32b-instruct-row-342`、`granite-4.2-30b-gguf`。
 
-浏览器中“选择模型”区域的列表来自以下公开接口：
+每个目录项包含：
 
-- `GET /api/models/presets`：服务端内置的外部仓库预置目录；
-- `GET /api/models/search?q=...`：按关键字搜索外部仓库模型。
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 稳定预置 ID；解析时作为 `preset_id` |
+| `name` | string | 前端展示名 |
+| `preset` | boolean | 目录项为 `true` |
+| `model` | string | 两段式仓库标识 `owner/name` |
+| `source` | string | 固定来源枚举 |
+| `revision` | string | 仓库修订号 |
+| `resource_url` | URI string | 仓库浏览页面，不是文件下载地址 |
+| `identity_status` | string | `verified` / `pending_validation` |
+| `hardware` | object | `vram_min`、`ram_min`、`disk_min`、`vram_recommended`、`ram_recommended`、`disk_recommended` 六个容量字符串 |
 
-这两个接口返回的是外部仓库资源，不是本地模型文件，也不是服务端 Manifest。用户点击并确认列表中的模型后，前端保存其 `model/source/revision`，再调用模型解析接口。
+成功响应为目录数组本身，不使用 `{success, data}` 包装。目录自身无法解析或校验时返回 HTTP 500：`{"code":"preset_catalog_invalid","message":"..."}`。
 
-## 3. `GET /api/node/hardware`
+## `GET /api/models/search?q=...`
 
-### 3.1 用途
-
-公开读取运行 BurnCloud Server/Node 的服务端主机硬件快照。不要求 JWT，响应使用 `Cache-Control: no-store`。
-
-该接口适合独立的硬件展示或诊断。模型解析请求会在服务端再次检测硬件，以保证硬件快照和 Variant 过滤来自同一次后端流程；前端不应把本接口的结果作为解析请求参数提交。
-
-### 3.2 成功响应
-
-```json
-{
-  "success": true,
-  "data": {
-    "platform": "windows",
-    "arch": "x86_64",
-    "cpu": "AMD Ryzen 9 7950X",
-    "memory_bytes": 34359738368,
-    "disk_available_bytes": 512110190592,
-    "accelerators": [
-      {
-        "kind": "nvidia",
-        "name": "NVIDIA GeForce RTX 4090",
-        "memory_bytes": 25769803776
-      }
-    ]
-  }
-}
-```
-
-`accelerators[].memory_bytes` 为 `null` 表示显存未知，不能解释为 `0`。没有加速器时返回空数组。
-
-### 3.3 错误
-
-| HTTP 状态 | `error.code` | 含义 |
-|---:|---|---|
-| `501` | `unsupported_platform` | 当前平台没有硬件探测实现 |
-| `500` | `hardware_probe_failed` | CPU、内存、磁盘或其他硬件信息探测失败 |
-
-### 3.4 TypeScript
-
-```ts
-type Accelerator = {
-  kind: "nvidia" | "amd" | "intel" | "apple" | "other";
-  name: string;
-  memory_bytes: number | null;
-};
-
-type HardwareSnapshot = {
-  platform: "windows" | "macos" | "linux" | "other";
-  arch: string;
-  cpu: string;
-  memory_bytes: number;
-  disk_available_bytes: number;
-  accelerators: Accelerator[];
-};
-
-type HardwareResponse = {
-  success: true;
-  data: HardwareSnapshot;
-};
-
-async function fetchHardware(): Promise<HardwareSnapshot> {
-  const response = await fetch("/api/node/hardware", {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  const body = await response.json();
-  if (!response.ok || body.success !== true) {
-    throw new Error(body.error?.message ?? "硬件检测失败");
-  }
-  return (body as HardwareResponse).data;
-}
-```
-
-## 4. `GET /api/models/presets`
-
-返回外部模型仓库预置项。当前返回的 `model/source/revision` 是后续解析请求需要提交的完整资源身份。
+`q` 去除首尾空白后必须非空，否则返回 HTTP 400 `{ "message": "..." }`。响应媒体类型为 `application/x-ndjson; charset=utf-8`，每行都是一个 JSON 快照：
 
 ```json
-[
-  {
-    "id": "qwen3-8b",
-    "name": "Qwen3-8B",
-    "preset": true,
-    "model": "Qwen/Qwen3-8B",
-    "source": "modelscope",
-    "revision": "master"
-  }
-]
+{"done":false,"items":[{"id":"qwen3-8b-gguf","name":"Qwen3-8B-GGUF","model":"Qwen/Qwen3-8B-GGUF","source":"modelscope","revision":"master"}]}
+{"done":true,"type":"models","items":[{"id":"qwen3-8b-gguf","name":"Qwen3-8B-GGUF","model":"Qwen/Qwen3-8B-GGUF","source":"modelscope","revision":"master"}]}
 ```
 
-字段说明：
+中间帧为累计快照，`type` 省略；终帧 `done=true`，`type` 为 `models`、`unavailable` 或 `failed`。`unavailable` 表示至少一个来源成功响应但没有命中，或部分来源不可用；`failed` 表示所有来源均失败。已合并的真实命中不会因另一个来源失败而被删除。
 
-- `id`：目录去重和 UI 标识；
-- `name`：前端展示名称；
-- `preset`：是否为服务端预置项；
-- `model`：外部模型仓库的 `owner/name`；
-- `source`：`modelscope`、`hf-mirror` 或 `huggingface`；
-- `revision`：分支、标签或提交修订号。
+## `GET /api/models/status`
 
-该接口不返回：
+该接口按所选身份实时发现有效远程 GGUF，并合并身份完全匹配的本地下载记录。支持且仅支持以下一种查询形式：
 
-- 本地模型 Manifest；
-- 量化 Variant；
-- 本地下载状态；
-- 当前硬件兼容结论。
+- 预置项：`?preset=qwen3-8b`。不得同时传入 `model`、`source` 或 `revision`。
+- 外部搜索项：`?model=Qwen%2FQwen3-8B-GGUF&source=modelscope&revision=master`。`model` 与 `source` 必须同时提供；`revision` 可省略，此时 ModelScope 默认 `master`，其他来源默认 `main`。
 
-因此，预置项出现不代表模型已经下载或可以在当前机器运行。
-
-## 5. `GET /api/models/search?q=...`
-
-搜索接口返回 `application/x-ndjson`，每一行都是累计快照。前端必须按行解析，不能等待一个完整 JSON 数组。
-
-### 5.1 中间快照
-
-```json
-{
-  "done": false,
-  "items": [
-    {
-      "id": "qwen3-8b",
-      "name": "Qwen3-8B",
-      "preset": false,
-      "model": "Qwen/Qwen3-8B",
-      "source": "modelscope",
-      "revision": "master"
-    }
-  ]
-}
-```
-
-### 5.2 最终快照
-
-```json
-{
-  "done": true,
-  "type": "models",
-  "items": [
-    {
-      "id": "qwen3-8b",
-      "name": "Qwen3-8B",
-      "preset": false,
-      "model": "Qwen/Qwen3-8B",
-      "source": "modelscope",
-      "revision": "master"
-    }
-  ]
-}
-```
-
-`type` 的含义：
-
-- `models`：至少有一个搜索结果；
-- `unavailable`：部分上游查询完成，但没有结果；
-- `failed`：所有上游查询失败。
-
-空查询的搜索请求返回 `400`。前端收到完成帧后再结束加载状态。
-
-## 6. `GET /api/models/status`
-
-该接口只探测外部仓库资源页面是否可访问，不进行硬件检测、Manifest 读取或 GGUF 解析。
-
-### 6.1 预置项查询
-
-```text
-GET /api/models/status?preset=qwen3-8b
-```
-
-### 6.2 外部模型查询
-
-```text
-GET /api/models/status?model=Qwen%2FQwen3-8B&source=modelscope&revision=master
-```
-
-### 6.3 成功响应
+查询形式缺失、冲突或身份无效时返回 HTTP 400 `{ "message": "..." }`。成功响应（字段均为顶层字段）：
 
 ```json
 {
   "status": "downloadable",
-  "model": "Qwen/Qwen3-8B",
+  "model": "Qwen/Qwen3-8B-GGUF",
   "source": "modelscope",
   "revision": "master",
-  "resource_url": "https://modelscope.cn/models/Qwen/Qwen3-8B/files?Revision=master"
+  "resource_url": "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/files?Revision=master",
+  "downloadable": true,
+  "unavailable_reason": null,
+  "identity_status": "verified",
+  "artifact_status": "not_downloaded",
+  "downloaded": false,
+  "local_path": null,
+  "actual_sha256": null,
+  "variants": [{
+    "id": "Qwen3-8B-Q4_K_M.gguf",
+    "quantization": "Q4_K_M",
+    "runtime": "llama.cpp",
+    "artifact_source": "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF/resolve/master/Qwen3-8B-Q4_K_M.gguf",
+    "expected_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "file_size_bytes": 4294967296,
+    "ram_bytes": 4294967296,
+    "vram_bytes": 6442450944,
+    "disk_bytes": 4294967296,
+    "artifact_status": "not_downloaded",
+    "downloaded": false,
+    "local_path": null,
+    "actual_sha256": null
+  }]
 }
 ```
 
-状态含义：
+- `status` 是兼容字段，仅表示仓库页面探测结果：`downloadable`（页面 HTTP 200）或 `developing`（探测失败/非 200），不能据此认定存在可用文件。
+- 顶层 `downloadable` 表示存在通过身份和元数据校验的远程直接文件工件；它不表示硬件兼容，也不表示已下载。
+- `unavailable_reason` 为 `null` 或 `{code,message}`。当前原因码：`preset_identity_pending`、`no_gguf_artifact`、`repository_not_found`、`repository_unavailable`。
+- `variants` 只包含有效远程 GGUF 或完全匹配且已验证的本地工件。`artifact_source` 是直接文件 URL；`expected_sha256` 是期望摘要；`file_size_bytes` 必须大于零。
+- `artifact_status` 为 `not_downloaded`、`downloading`、`verifying`、`downloaded` 或 `failed`。本地回执有效时才设置 `downloaded=true` 并返回 `local_path` 和 `actual_sha256`。
+- 对身份待校验预置，状态接口返回 `downloadable=false` 和 `preset_identity_pending`，不生成 Variant。
 
-- `downloadable`：资源页面 HTTP GET 返回 `200`；
-- `developing`：资源不可访问、返回非 `200` 或探测失败。
+HTTP 503 的 `catalog_unavailable` 表示读取本地工件目录失败；实时上游不可用会返回 HTTP 200、`downloadable=false` 和 `repository_unavailable`，并尝试精确匹配的已校验本地工件。HTTP 500 的 `preset_catalog_invalid` 表示目录配置无效。状态不可用与 Node 硬件不兼容是不同结果。
 
-`downloadable` 只说明资源页面可以访问，不表示：
+## `GET /api/node/hardware`
 
-- 模型已经下载；
-- 仓库存在 `.gguf` 文件；
-- 当前硬件能够运行模型；
-- 已经完成 SHA-256 校验；
-- 模型已经部署或启动 Runtime。
+返回服务端 Node 主机硬件快照，使用 `Cache-Control: no-store`，不要求 JWT。该接口用于诊断和展示；`POST /api/node/models/resolve` 会自行重新检测硬件，不接受前端传入该快照。
 
-## 7. `POST /api/node/models/resolve`
+成功响应包括 `platform`、`arch`、`cpu`、`memory_bytes`、`disk_available_bytes` 和 `accelerators[]`；容量单位均为字节。`accelerators[].memory_bytes=null` 表示未知显存，不等同于零；无加速器时为空数组。HTTP 501 `unsupported_platform` 表示当前平台无探测实现；HTTP 500 `hardware_probe_failed` 表示硬件探测失败。
 
-### 7.1 用途
+## `POST /api/node/models/resolve`
 
-直接解析前端当前选中的外部模型。该接口公开、不要求 JWT，响应使用 `Cache-Control: no-store`。
-
-前端不能提交硬件信息，也不能上传 Manifest。服务端以真实硬件探测结果为准，并使用受信任的服务端逻辑创建临时 Manifest。
-
-### 7.2 请求
-
-```http
-POST /api/node/models/resolve
-Content-Type: application/json
-```
+请求体需要提交完整仓库身份。预置目录项必须连同绑定的 `preset_id` 提交；`preset_id` 与 `model`、`source`、`revision` 任一不匹配时拒绝请求。非预置外部搜索项可以省略 `preset_id`，与旧版请求兼容。
 
 ```json
 {
-  "model": "Qwen/Qwen3-8B",
+  "model": "Qwen/Qwen3-8B-GGUF",
   "source": "modelscope",
-  "revision": "master"
+  "revision": "master",
+  "preset_id": "qwen3-8b"
 }
 ```
 
-字段约束：
+不向解析接口提交硬件值。服务端校验身份、实时发现或精确回退已验证的 GGUF 工件、检测 Node 硬件并执行最低资源过滤。推荐资源不参与准入。成功 HTTP 200 响应始终带 `success=true` 和 `data`：
 
-- `model` 必须是 `owner/name` 格式；
-- `source` 必须是 `modelscope`、`hf-mirror` 或 `huggingface`；
-- `revision` 必须是非空安全路径段；
-- `model/source/revision` 必须来自用户在模型选择器中点击并确认的同一条目录记录；
-- 前端不提交 RAM、VRAM、磁盘或 Runtime 能力；
-- 当前服务端默认使用 `llama.cpp`。
+- `data.status=resolved`：`candidates` 仅含满足最低硬件要求的工件；候选提供工件 ID、量化、最低 RAM/VRAM/磁盘字节、runtime、直接 `artifact_uri` 和 SHA-256 `checksum`。
+- `data.status=unsupported`：无有效候选时 `candidates=[]`，`reason.code` 为 `preset_identity_pending`、`no_valid_gguf` 或 `no_compatible_variant`；响应仍可带本次 Node 硬件快照。
 
-### 7.3 服务端发现过程
+HTTP 错误响应为 `{ "success": false, "error": { "code": "...", "message": "..." } }`：
 
-ModelScope 使用类似以下文件列表接口：
+| HTTP | 错误码 | 含义 |
+| ---: | --- | --- |
+| 400 | `invalid_model` | JSON 或模型/来源/修订号无效 |
+| 400 | `unknown_preset` | `preset_id` 不存在 |
+| 400 | `preset_identity_mismatch` | 预置 ID 与请求仓库身份不一致 |
+| 500 | `preset_catalog_invalid` | 服务端预置目录无效 |
+| 404 | `model_repository_not_found` | 仓库或指定修订不存在 |
+| 502 | `model_repository_unavailable` | 上游不可用且无完全匹配的已验证本地工件 |
+| 501 | `unsupported_platform` | 当前平台不支持 Node 硬件检测 |
+| 500 | `hardware_probe_failed` | Node 硬件检测失败 |
+| 500 | `manifest_invalid` | 解析清单无效 |
+| 500 | `model_resolution_failed` | 其他内部解析错误 |
 
-```text
-https://modelscope.cn/api/v1/models/{owner}/{name}/repo/files?Revision={revision}&Recursive=true
-```
+## 客户端准入顺序
 
-Hugging Face 和 `hf-mirror` 使用类似以下接口：
-
-```text
-https://{host}/api/models/{owner}/{name}/tree/{revision}?recursive=true
-```
-
-服务端只接受有效的 `.gguf` 文件：
-
-- 文件路径作为 `variant_id`；
-- 文件名中识别 `Q4_K_M`、`Q8_0`、`F16` 等量化标签；
-- 文件大小作为 `disk_size_bytes`；
-- 文件大小同时作为保守的 `min_ram_bytes`；
-- 外部仓库没有声明显存门槛时使用 `min_vram_bytes: 0`；这里的 `0` 表示“显存要求未声明”，不是“需要 0 显存”；
-- ModelScope 的 `Sha256` 或 Hugging Face LFS `oid` 作为 SHA-256；
-- 下载地址由服务端根据仓库来源、模型、修订号和文件路径构造；
-- Variant 保持上游文件列表顺序，不进行评分或重新排序。
-
-当前服务端不会把不带有效 SHA-256 或文件大小为零的文件返回为候选。
-
-### 7.4 成功且存在兼容 Variant
-
-```json
-{
-  "success": true,
-  "data": {
-    "status": "resolved",
-    "model": "Qwen/Qwen3-8B",
-    "hardware": {
-      "platform": "windows",
-      "arch": "x86_64",
-      "cpu": "AMD Ryzen 9 7950X",
-      "memory_bytes": 34359738368,
-      "disk_available_bytes": 512110190592,
-      "accelerators": [
-        {
-          "kind": "nvidia",
-          "name": "NVIDIA GeForce RTX 4090",
-          "memory_bytes": 25769803776
-        }
-      ]
-    },
-    "candidates": [
-      {
-        "model_name": "Qwen/Qwen3-8B",
-        "variant_id": "Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf",
-        "quantization": "Q4_K_M",
-        "min_ram_bytes": 4294967296,
-        "min_vram_bytes": 0,
-        "disk_size_bytes": 1929903008,
-        "runtime": "llama.cpp",
-        "artifact_uri": "https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/Qwen3-8B-GGUF/qwen3-8b-q4_k_m.gguf",
-        "checksum": "sha256:..."
-      }
-    ]
-  }
-}
-```
-
-### 7.5 没有兼容 Variant
-
-没有 GGUF 文件，或者所有 GGUF 文件均未通过 RAM、显存、磁盘或 Runtime 过滤时，返回正常业务结果，不使用 HTTP 错误：
-
-```json
-{
-  "success": true,
-  "data": {
-    "status": "unsupported",
-    "model": "Qwen/Qwen3-8B",
-    "hardware": {
-      "platform": "windows",
-      "arch": "x86_64",
-      "cpu": "AMD Ryzen 9 7950X",
-      "memory_bytes": 34359738368,
-      "disk_available_bytes": 512110190592,
-      "accelerators": []
-    },
-    "candidates": [],
-    "reason": {
-      "code": "no_compatible_variant",
-      "message": "当前模型仓库没有满足当前硬件的 GGUF 版本"
-    }
-  }
-}
-```
-
-### 7.6 候选过滤顺序
-
-底层 `RealModelResolver` 按以下条件过滤：
-
-1. 系统 RAM；
-2. 单个加速器中的最大已知显存，不累加多张 GPU；
-3. 服务端支持的 Runtime，目前为 `llama.cpp`；
-4. 当前工作目录所在文件系统的可用磁盘空间；
-5. 保持 Manifest/仓库发现结果的原始顺序。
-
-### 7.7 错误映射
-
-| HTTP 状态 | `error.code` | 场景 |
-|---:|---|---|
-| `400` | `invalid_model` | 请求体无效、模型名为空、模型不是 `owner/name`、来源或修订号无效 |
-| `404` | `model_repository_not_found` | 外部仓库或指定修订不存在 |
-| `502` | `model_repository_unavailable` | 外部仓库不可访问、返回异常状态或响应格式无效 |
-| `501` | `unsupported_platform` | 当前平台没有硬件探测实现 |
-| `500` | `hardware_probe_failed` | 硬件检测失败 |
-| `500` | `manifest_invalid` | 服务端动态 Manifest 后端声明不一致 |
-| `500` | `model_resolution_failed` | 其他解析异常 |
-
-所有错误响应都使用：
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "invalid_model",
-    "message": "模型解析请求无效"
-  }
-}
-```
-
-## 8. 前端 TypeScript 契约
-
-```ts
-type ModelSource = "modelscope" | "hf-mirror" | "huggingface";
-
-type CatalogSelection = {
-  name: string;
-  model: string;
-  source: ModelSource;
-  revision: string;
-  resource_url: string;
-};
-
-type ModelCandidate = {
-  model_name: string;
-  variant_id: string;
-  quantization: string;
-  min_ram_bytes: number;
-  // 0 表示服务端未声明显存门槛，UI 不应显示“显存 0 GiB”。
-  min_vram_bytes: number;
-  disk_size_bytes: number;
-  runtime: "llama.cpp" | string;
-  artifact_uri: string;
-  checksum: string;
-};
-
-type ResolveModelData = {
-  status: "resolved" | "unsupported";
-  model: string;
-  hardware: HardwareSnapshot;
-  candidates: ModelCandidate[];
-  reason?: {
-    code: "no_compatible_variant";
-    message: string;
-  };
-};
-
-async function resolveSelectedModel(
-  selection: CatalogSelection,
-): Promise<ResolveModelData> {
-  const response = await fetch("/api/node/models/resolve", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-    body: JSON.stringify({
-      model: selection.model,
-      source: selection.source,
-      revision: selection.revision,
-    }),
-  });
-  const body = await response.json();
-  if (!response.ok || body.success !== true) {
-    throw new Error(body.error?.message ?? "模型解析失败");
-  }
-  return body.data as ResolveModelData;
-}
-```
-
-前端展示量化版本时：
-
-```ts
-function vramLabel(bytes: number): string {
-  return bytes === 0 ? "显存要求未声明" : `显存 ${(bytes / 2 ** 30).toFixed(1)} GiB`;
-}
-```
-
-## 9. 推荐前端调用流程
-
-```text
-GET /api/models/presets
-或
-GET /api/models/search?q=...
-        ↓
-用户点击并确认某一条目录模型
-        ↓
-保存该条记录的 model/source/revision
-        ↓
-GET /api/models/status（可选，仅显示仓库页面状态）
-        ↓
-POST /api/node/models/resolve
-        ↓
-服务端实时发现 GGUF + 检测硬件 + 过滤候选
-        ↓
-前端展示 candidates
-        ↓
-用户选择 variant_id
-        ↓
-进入后续下载、校验、部署流程
-```
-
-当前 Chat 前端已经删除了旧的“服务端 Manifest 模型列表”请求，不再调用：
-
-```text
-GET /api/node/models/manifests
-```
-
-用户确认模型后，`CatalogSelection` 会直接传入 `POST /api/node/models/resolve`。如果仓库没有可用 GGUF 或当前硬件不满足要求，前端展示 `unsupported` 的业务原因。
-
-当前下载、SHA-256 校验、Runtime 启动和部署仍未全部接入生产流程；解析接口返回候选并不代表模型已经部署完成。
-
-## 10. 关键不一致与边界
-
-### 10.1 外部模型 ID 与旧本地 Manifest 名称
-
-旧流程使用：
-
-```text
-qwen2.5:1.5b
-qwen2.5:3b
-llama3.2:1b
-```
-
-新流程使用用户选择的外部仓库身份：
-
-```text
-Qwen/Qwen3-8B + modelscope + master
-```
-
-两套标识不再映射。前端不能把旧的 Ollama 风格名称或显示名称传给新接口，必须提交目录记录中的 `model/source/revision`。
-
-### 10.2 `/api/models/status` 不能替代模型解析
-
-资源状态接口不读取：
-
-- GGUF 文件列表；
-- 量化信息；
-- RAM/VRAM/磁盘门槛；
-- Runtime 要求；
-- SHA-256；
-- 当前硬件兼容结果。
-
-### 10.3 不要让前端提交硬件参数
-
-如果前端先调用 `/api/node/hardware`，再把硬件值发送给解析接口，可能造成快照过期或被伪造。解析接口必须由服务端重新检测硬件。
-
-## 11. 对应实现位置
-
-| 功能 | 文件 |
-|---|---|
-| 硬件 HTTP Handler | `crates/interfaces/server/src/api/hardware.rs` |
-| 模型解析 HTTP Handler | `crates/interfaces/server/src/api/model_resolution.rs` |
-| 路由注册 | `crates/interfaces/server/src/api/mod.rs` |
-| OpenAPI | `crates/interfaces/server/src/api/openapi.rs` |
-| 生产 Node 解析入口 | `crates/interfaces/server/src/node_production.rs` |
-| Manifest 数据结构和空默认入口 | `crates/supply/model/src/manifest.rs` |
-| Runtime/资源过滤 | `crates/supply/model/src/real_model_resolver.rs` |
-| 前端目录 HTTP 客户端 | `crates/interfaces/client/src/domains/chat/catalog.rs` |
-| 前端选择器 | `crates/interfaces/client/src/domains/chat/selector.rs` |
-| 前端准备状态机 | `crates/interfaces/client/src/domains/chat/state.rs` |
-| 前端准备卡片 | `crates/interfaces/client/src/domains/chat/page.rs` |
-
-## 12. 测试覆盖
-
-当前应覆盖以下行为：
-
-- 硬件成功、无加速器、未知显存、平台不支持和探测失败；
-- 预置目录字段和顺序；
-- 搜索 NDJSON 累计快照与完成帧；
-- `downloadable/developing` 状态语义；
-- 空模型、非法仓库标识和未知来源；
-- 外部文件列表中的 `.gguf` 筛选；
-- 量化名称、文件大小、下载地址和 SHA-256 解析；
-- 空默认 Manifest；
-- RAM、单卡最大 VRAM、磁盘和 Runtime 过滤；
-- 多个候选保持仓库发现顺序；
-- 前端将当前 `CatalogSelection` 的 `model/source/revision` 发送到解析接口；
-- `min_vram_bytes: 0` 在前端显示为“显存要求未声明”。
-
-如果后续把下载和部署完整接入，还需要增加：
-
-- 解析 Handler 的真实上游 mock 集成测试；
-- OpenAPI 路由和 schema 校验；
-- 前端选择器到解析请求的端到端测试；
-- 下载、校验、Runtime 启动和部署状态机测试。
+1. 将仓库身份绑定为目录 `id`（即 `preset_id`）或外部搜索的完整 `model/source/revision`，不要用显示名代替。
+2. 对预置状态按 `preset` 查询，对外部模型按 `model + source [+ revision]` 查询。
+3. 若状态返回远程 `downloadable=true`，只允许从通过校验的 `variants` 中进入硬件解析；若 `downloadable=false`，仅可复用返回的完整、身份相符且 SHA-256 已验证的本地工件。
+4. 调用解析接口时，预置项传 `preset_id`；普通搜索结果省略。以解析响应的 Node 实测硬件与候选列表为准。
+5. 只有响应中身份匹配、具备直接文件 URL 和有效 SHA-256 的候选可交给下载器。仓库页面 `resource_url` 永远不能作为下载地址。

@@ -67,6 +67,13 @@ fn maximum_vram(profile: &HardwareProfile) -> u64 {
         .unwrap_or(0)
 }
 
+fn closed_monitor_errors(
+) -> tokio::sync::mpsc::UnboundedReceiver<burncloud_node_runtime::deployment::DeploymentMonitorError>
+{
+    let (_, receiver) = tokio::sync::mpsc::unbounded_channel();
+    receiver
+}
+
 #[test]
 fn production_node_can_be_assembled_before_starting_an_async_runtime() {
     let _node = ProductionNode::new();
@@ -169,9 +176,10 @@ async fn orchestrator_passes_real_ram_to_the_resolver_and_stops_before_preparati
         SystemHardwareProbe::new(),
         FakeArtifactPreparer,
         FakeRuntimePreparer,
-        FakeProcessManager::default(),
-        FakeReadinessProbe,
-        FakeHealthProbe,
+        Arc::new(FakeProcessManager::default()),
+        Arc::new(FakeReadinessProbe),
+        Arc::new(FakeHealthProbe),
+        closed_monitor_errors(),
     );
     let mut orchestrator = NodeOrchestrator::new(resolver, FakeRuntimeAdapter, machine);
     let outcome = orchestrator
@@ -202,9 +210,10 @@ async fn orchestrator_filters_runtime_before_preparing_the_artifact() {
         SystemHardwareProbe::new(),
         FakeArtifactPreparer,
         FakeRuntimePreparer,
-        FakeProcessManager::default(),
-        FakeReadinessProbe,
-        FakeHealthProbe,
+        Arc::new(FakeProcessManager::default()),
+        Arc::new(FakeReadinessProbe),
+        Arc::new(FakeHealthProbe),
+        closed_monitor_errors(),
     );
     let mut orchestrator = NodeOrchestrator::new(resolver, FakeRuntimeAdapter, machine);
 
@@ -300,9 +309,10 @@ async fn orchestrator_retries_the_next_candidate_after_runtime_failure() {
         FailOnceRuntimePreparer {
             attempts: attempts.clone(),
         },
-        FakeProcessManager::default(),
-        FakeReadinessProbe,
-        FakeHealthProbe,
+        Arc::new(FakeProcessManager::default()),
+        Arc::new(FakeReadinessProbe),
+        Arc::new(FakeHealthProbe),
+        closed_monitor_errors(),
     );
     let mut orchestrator = NodeOrchestrator::new(RetryResolver, FakeRuntimeAdapter, machine);
 

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "version": "b8581",
+  "source_base_url": "https://github.com/ggml-org/llama.cpp/releases/download/b8581/",
+  "archive_limits": {
+    "max_path_bytes": 4096,
+    "max_entries": 100000,
+    "max_file_bytes": 2147483648,
+    "max_unpacked_bytes": 4294967296
+  },
+  "targets": {
+    "x86_64-pc-windows-msvc": {
+      "auto_backends": ["cpu"],
+      "base": {
+        "package_kind": "cpu",
+        "filename": "llama-b8581-bin-win-cpu-x64.zip",
+        "source_size_bytes": 38707858,
+        "source_sha256": "71fffc57588b12142a1f0b37f8a1f0a1b122d14f70435f3689dd6399ba4317e7",
+        "server_relative_path": "llama-server.exe",
+        "license_components": ["llama.cpp", "libomp140.x86_64.dll"]
+      },
+      "required_dependencies": ["vc_redist.x64.exe"],
+      "cuda": {
+        "download_base_url": "https://gh-proxy.com/https://github.com/ggml-org/llama.cpp/releases/download/b8581/",
+        "server": {
+          "package_kind": "cuda12.4",
+          "filename": "llama-b8581-bin-win-cuda-12.4-x64.zip",
+          "source_size_bytes": 232525426,
+          "source_sha256": "0be0ef75d1544e836ba8e90c4fe02cad253cb8983ebcb68ac774183a28f400d5",
+          "server_relative_path": "llama-server.exe",
+          "license_components": ["llama.cpp", "libomp140.x86_64.dll", "ggml-cuda.dll"]
+        },
+        "cudart": {
+          "package_kind": "cuda12.4",
+          "filename": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+          "source_size_bytes": 391443627,
+          "source_sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+          "license_components": ["nvidia-cuda-12.4"]
+        }
+      }
+    },
+    "aarch64-apple-darwin": {
+      "auto_backends": ["metal", "cpu"],
+      "base": {
+        "package_kind": "native",
+        "filename": "llama-b8581-bin-macos-arm64.tar.gz",
+        "source_size_bytes": 39574927,
+        "source_sha256": "0c79d0c1370c81137d58cdc720881dfbab67cae02769d9eaf895f127d0785056",
+        "server_relative_path": "llama-b8581/llama-server",
+        "license_components": ["llama.cpp"]
+      }
+    },
+    "x86_64-apple-darwin": {
+      "auto_backends": ["metal", "cpu"],
+      "base": {
+        "package_kind": "native",
+        "filename": "llama-b8581-bin-macos-x64.tar.gz",
+        "source_size_bytes": 100650354,
+        "source_sha256": "e03188ae51dc1c3ba8d2a5d6220ac0d6639a47db64af4d0c93bc05b494a98d0b",
+        "server_relative_path": "llama-b8581/llama-server",
+        "license_components": ["llama.cpp"]
+      }
+    },
+    "x86_64-unknown-linux-gnu": {
+      "auto_backends": ["cpu"],
+      "base": {
+        "package_kind": "cpu",
+        "filename": "llama-b8581-bin-ubuntu-x64.tar.gz",
+        "source_size_bytes": 31371639,
+        "source_sha256": "8424fecb5a260f15a3aa90016a47242621881b78dc5ebb4cb418d0134d5cbe43",
+        "server_relative_path": "llama-b8581/llama-server",
+        "license_components": ["llama.cpp"]
+      }
+    }
+  }
+}

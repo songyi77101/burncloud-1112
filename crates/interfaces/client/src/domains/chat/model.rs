@@ -1,6 +1,7 @@
 //! 聊天模块内部的接口数据契约与纯资源比较；不生成外部能力结果。
 
 use super::state::ReasoningEffort;
+use serde::Deserialize;
 
 /// 字节与 GiB 的展示换算基数。
 pub(super) const GIB: u64 = 1024 * 1024 * 1024;
@@ -24,7 +25,7 @@ impl ChatModel {
 }
 
 /// 版本及不可变工件快照；资源要求统一使用字节。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(super) struct ModelVariant {
     pub(super) id: String,
     pub(super) quantization: String,
@@ -34,6 +35,15 @@ pub(super) struct ModelVariant {
     pub(super) ram_bytes: u64,
     pub(super) vram_bytes: u64,
     pub(super) disk_bytes: u64,
+    /// 状态接口提供的原始工件大小；解析候选不重复推断该值。
+    ///
+    /// # Examples
+    /// 状态响应中的 `1024` 字节工件保存为 `Some(1024)`。
+    ///
+    /// # Notes
+    /// 解析响应不单独提供原始工件大小，因此保留为 `None`。
+    #[serde(default)]
+    pub(super) file_size_bytes: Option<u64>,
 }
 impl ModelVariant {
     /// RAM 和磁盘未知时不视为充足；显存只比较单卡最大可用量。
@@ -191,6 +201,7 @@ impl PreparationStage {
             Self::Detecting
                 | Self::Downloading
                 | Self::Verifying
+                | Self::ArtifactReady
                 | Self::LoadingPackage
                 | Self::Deploying
                 | Self::HealthChecking
@@ -235,11 +246,14 @@ pub(super) struct Preparation {
     pub(super) events: Vec<PreparationEvent>,
     pub(super) actual_digest: Option<String>,
     pub(super) local_path: Option<String>,
+    /// Node 部署成功后返回的 Router 准入状态；查询失败时保持未知。
+    pub(super) route_status: Option<String>,
     pub(super) error: Option<ChatError>,
     pub(super) collapsed: bool,
 }
 impl Preparation {
     /// 未知下载总量不生成百分比；检测项按已完成回调显示。
+    #[allow(dead_code, reason = "测试保留整数百分比接口，页面使用细粒度比例")]
     pub(super) fn progress(&self) -> Option<u8> {
         if self.stage == PreparationStage::Detecting {
             return Some((self.hardware_events.len() * 25) as u8);
@@ -248,6 +262,13 @@ impl Preparation {
             .filter(|total| *total > 0)
             .map(|total| ((u128::from(self.completed_bytes) * 100) / u128::from(total)) as u8)
     }
+    /// 返回细粒度下载百分比，避免大文件早期整数百分比长期显示为 0。
+    pub(super) fn progress_ratio(&self) -> Option<f64> {
+        let total = self.total_bytes.filter(|total| *total > 0)?;
+        let percent = (self.completed_bytes as f64 * 100.0) / total as f64;
+        Some(percent.clamp(0.0, 100.0))
+    }
+
     /// 获取已确认的版本快照。
     pub(super) fn variant(&self) -> Option<&ModelVariant> {
         self.model
@@ -268,6 +289,8 @@ pub(super) struct PreparedModel {
     pub(super) variant: ModelVariant,
     pub(super) actual_sha256: String,
     pub(super) local_path: String,
+    /// 服务端自动部署后返回的真实路由模型标识；旧本地替身为空。
+    pub(super) route_model_id: Option<String>,
 }
 impl PreparedModel {
     /// 校验后端成功凭据，不访问磁盘；真实文件校验属于后端职责。
@@ -289,6 +312,7 @@ pub(super) fn valid_digest(value: &str) -> bool {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum ErrorKind {
+    Cancelled,
     InvalidParameter,
     NotFound,
     NotConnected,

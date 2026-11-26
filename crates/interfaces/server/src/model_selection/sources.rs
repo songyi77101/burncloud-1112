@@ -14,17 +14,35 @@ use super::Config;
 
 const PAGE_SIZE: &str = "50";
 
+/// 模型目录支持的固定来源。
+///
+/// # Examples
+/// ModelScope、镜像站和 Hugging Face 官方站点分别使用固定线协议值。
+///
+/// # Notes
+/// 不接受由请求方提供的任意主机名。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum Source {
+pub(crate) enum Source {
+    /// ModelScope 模型仓库。
     #[serde(rename = "modelscope")]
     ModelScope,
+    /// Hugging Face 镜像站点。
     #[serde(rename = "hf-mirror")]
     HfMirror,
+    /// Hugging Face 官方站点。
     #[serde(rename = "huggingface")]
     HuggingFace,
 }
 
 impl Source {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelScope => "modelscope",
+            Self::HfMirror => "hf-mirror",
+            Self::HuggingFace => "huggingface",
+        }
+    }
+
     // 同名型号在不同站点出现时，优先选择国内来源，而不改变到达顺序。
     fn priority(self) -> u8 {
         match self {
@@ -34,7 +52,7 @@ impl Source {
         }
     }
 
-    fn base(self, config: &Config) -> &str {
+    pub(super) fn base(self, config: &Config) -> &str {
         match self {
             Source::ModelScope => &config.modelscope,
             Source::HfMirror => &config.hf_mirror,
@@ -58,18 +76,27 @@ impl Source {
 }
 
 /// 模块内部的仓库资源快照，来源只能使用固定站点枚举。
+///
+/// # Examples
+/// `Qwen/Qwen3-8B-GGUF`、`modelscope` 和 `master` 组成一个资源身份。
+///
+/// # Notes
+/// 仓库网页地址与可下载工件地址是不同概念。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(super) struct ModelResource {
-    pub(super) model: String,
-    pub(super) source: Source,
-    pub(super) revision: String,
+pub(crate) struct ModelResource {
+    /// 两段式 owner/name 仓库标识。
+    pub(crate) model: String,
+    /// 固定的模型来源枚举。
+    pub(crate) source: Source,
+    /// 精确仓库修订号。
+    pub(crate) revision: String,
 }
 
 impl ModelResource {
     /// 校验外部仓库参数并构造资源页面地址，不接受用户提供的任意网址。
     ///
     /// # Examples
-    /// `Qwen/Qwen3-8B` 配合 ModelScope 的 `master` 修订号定位仓库页面。
+    /// `Qwen/Qwen3-8B-GGUF` 配合 ModelScope 的 `master` 修订号定位仓库页面。
     ///
     /// # Notes
     /// 页面地址不是可部署的模型文件。

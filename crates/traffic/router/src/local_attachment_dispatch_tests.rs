@@ -66,6 +66,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new(model: &str) -> Self {
+        Self::build(model, true).await
+    }
+
+    async fn new_unpriced(model: &str) -> Self {
+        Self::build(model, false).await
+    }
+
+    async fn build(model: &str, with_price: bool) -> Self {
         let file = tempfile::NamedTempFile::new().unwrap();
         let url =
             burncloud_database::sqlite_url(&file.path().to_string_lossy(), cfg!(windows), true);
@@ -78,7 +86,9 @@ impl Fixture {
         // 独立测试账户、密钥和价格仍经过真实认证与计费，不关闭生产校验。
         sqlx::query(r#"INSERT INTO user_accounts (id, username, password_hash, status, "group") VALUES ('local-test', 'local-test', '', 1, 'default')"#).execute(pool).await.unwrap();
         sqlx::query("INSERT INTO user_api_keys (user_id, key, status, remain_quota) VALUES ('local-test', 'sk-local-test', 1, 1000000000)").execute(pool).await.unwrap();
-        seed_price(&db, model).await.unwrap();
+        if with_price {
+            seed_price(&db, model).await.unwrap();
+        }
         let price_cache = burncloud_commerce_billing::PriceCache::load(&db)
             .await
             .unwrap();
@@ -141,6 +151,9 @@ impl Fixture {
                     base_url: base_url.into(),
                 },
                 Some(tokio::time::Instant::now()),
+                0,
+                None,
+                false,
             )
             .await
             .unwrap()
@@ -242,6 +255,39 @@ async fn authenticated_dispatch_preserves_alias_path_credentials_feedback_and_bi
             .status(),
         StatusCode::NOT_FOUND
     );
+    stop(server).await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn strict_billing_allows_an_unpriced_local_only_model() {
+    let model = "Qwen2.5-0";
+    let mut fixture = Fixture::new_unpriced(model).await;
+    let (tx, mut received) = mpsc::channel(1);
+    let app = Router::new().fallback(axum::routing::post(
+        move |uri: Uri, axum::Json(body): axum::Json<serde_json::Value>| {
+            let tx = tx.clone();
+            async move {
+                tx.send((uri, body)).await.unwrap();
+                axum::Json(response_json(model))
+            }
+        },
+    ));
+    let (url, server) = upstream(app).await;
+    fixture.attach(model, &url).await;
+
+    let response = chat(fixture.state.clone(), model, "/v1/chat/completions").await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let (uri, request) = received.recv().await.unwrap();
+    assert_eq!(uri.path(), "/v1/chat/completions");
+    assert_eq!(request["model"], model);
+
+    let log = fixture.logs.recv().await.unwrap();
+    assert_eq!(log.cost, 0);
+    assert_eq!(log.cost_status.as_deref(), Some("price_missing"));
+
     stop(server).await;
     fixture.close().await;
 }
@@ -489,13 +535,6 @@ async fn auth_billing_shaper_and_true_route_miss_keep_their_error_branches() {
     let response = chat(fixture.state.clone(), "errors:test", "/v1/chat/completions").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()["X-Rejected-By"], "shaper");
-    fixture.attach("no-price", &url).await;
-    assert_eq!(
-        chat(fixture.state.clone(), "no-price", "/v1/chat/completions")
-            .await
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
     assert_eq!(
         chat(
             fixture.state.clone(),

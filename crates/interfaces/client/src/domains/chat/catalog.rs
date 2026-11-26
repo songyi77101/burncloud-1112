@@ -8,6 +8,8 @@ use reqwest::{Client, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
+const PRESET_CATALOG_COUNT: usize = 388;
+
 /// 模块内部 HTTP 客户端；生产请求主服务，测试可注入本地响应。
 #[derive(Clone)]
 pub(super) struct CatalogClient {
@@ -35,6 +37,39 @@ pub(super) struct CatalogModel {
     pub(super) model: String,
     pub(super) source: String,
     pub(super) revision: String,
+    #[serde(default)]
+    pub(super) resource_url: Option<String>,
+    #[serde(default)]
+    pub(super) hardware: Option<HardwareRequirements>,
+    #[serde(default)]
+    pub(super) identity_status: Option<IdentityStatus>,
+}
+
+/// 服务端预置项身份校验状态。
+///
+/// # Examples
+/// 已核实项反序列化为 `IdentityStatus::Verified`。
+///
+/// # Notes
+/// 待校验身份只允许查看，不得进入下载选择。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum IdentityStatus {
+    /// 仓库身份已核对。
+    Verified,
+    /// 仓库身份待人工核对，不允许下载。
+    PendingValidation,
+}
+
+/// 目录接口中的六项硬件配置，保留来源表格的数值及单位。
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub(super) struct HardwareRequirements {
+    pub(super) vram_min: String,
+    pub(super) ram_min: String,
+    pub(super) disk_min: String,
+    pub(super) vram_recommended: String,
+    pub(super) ram_recommended: String,
+    pub(super) disk_recommended: String,
 }
 
 /// 已确认的仓库快照；页面地址不是可部署的模型文件。
@@ -45,6 +80,19 @@ pub(super) struct CatalogVersion {
     pub(super) revision: String,
     pub(super) source: String,
     pub(super) resource_url: String,
+    #[serde(default)]
+    pub(super) variants: Vec<ModelVariant>,
+    #[serde(skip)]
+    pub(super) verified_variants: Vec<VerifiedVariant>,
+}
+
+/// 目录查验通过的单个文件；不得把模型级路径交给另一个候选版本部署。
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct VerifiedVariant {
+    id: String,
+    uri: String,
+    sha256: String,
+    path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -139,7 +187,107 @@ struct DownloadTaskData {
     actual_sha256: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct DeployRequest<'a> {
+    model_path: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct AutoDeployRequest<'a> {
+    model: &'a str,
+    source: &'a str,
+    revision: &'a str,
+    variant_id: &'a str,
+    checksum: &'a str,
+    backend: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoDeployEnvelope {
+    success: bool,
+    data: Option<AutoDeployData>,
+    error: Option<RemoteHardwareError>,
+    #[serde(default)]
+    _reused: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoDeployData {
+    task_id: String,
+    status: String,
+    ready_to_chat: bool,
+    deployment: Option<AutoDeployDeployment>,
+    error: Option<RemoteHardwareError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoDeployDeployment {
+    model_id: String,
+}
+
+#[allow(
+    clippy::disallowed_types,
+    reason = "部署协议不约束事件内容，需要原样持有"
+)]
+type DeployEvent = serde_json::Value;
+
+#[derive(Debug, Deserialize)]
+struct DeployCapacity {
+    total_slots: u32,
+    free_slots: u32,
+    observed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeploySnapshot {
+    model_id: String,
+    status: String,
+    #[serde(default)]
+    route_status: Option<String>,
+    #[serde(default)]
+    route_attachment_id: Option<i32>,
+    #[serde(default)]
+    capacity: Option<DeployCapacity>,
+    #[serde(rename = "stage", deserialize_with = "required_option")]
+    _stage: Option<String>,
+    #[serde(rename = "state", deserialize_with = "required_option")]
+    _state: Option<String>,
+    #[serde(rename = "endpoint", deserialize_with = "required_option")]
+    _endpoint: Option<String>,
+    #[serde(rename = "pid", deserialize_with = "required_option")]
+    _pid: Option<u32>,
+    #[serde(
+        rename = "last_heartbeat_unix_ms",
+        deserialize_with = "required_option"
+    )]
+    _last_heartbeat_unix_ms: Option<u64>,
+    #[serde(deserialize_with = "required_option")]
+    error: Option<String>,
+    #[serde(rename = "events")]
+    _events: Vec<DeployEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeployError {
+    error: String,
+}
+
+fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+// 容量探测可能在首次 Ready 之后才完成；客户端只做有限的展示状态收敛，不能阻塞
+// Node 部署本身，也不能因为查询失败撤销已经提交的部署。
+#[allow(dead_code, reason = "旧路由状态兼容测试仍覆盖有限收敛逻辑")]
+const ROUTE_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+#[allow(dead_code, reason = "旧路由状态兼容测试仍覆盖有限收敛逻辑")]
+const ROUTE_STATUS_POLL_ATTEMPTS: usize = 20;
 
 #[derive(Debug, Deserialize)]
 struct DownloadTaskEnvelope {
@@ -185,7 +333,92 @@ pub(super) enum VersionStatus {
     Downloadable,
 }
 
+/// 模型目录对应的本地工件状态。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ArtifactStatus {
+    #[default]
+    NotDownloaded,
+    Downloading,
+    Verifying,
+    Downloaded,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CatalogStatusVariant {
+    #[serde(flatten)]
+    variant: ModelVariant,
+    #[serde(default)]
+    artifact_status: ArtifactStatus,
+    #[serde(default)]
+    downloaded: bool,
+    local_path: Option<String>,
+    actual_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CatalogStatusResponse {
+    status: VersionStatus,
+    model: String,
+    source: String,
+    revision: String,
+    resource_url: String,
+    downloadable: bool,
+    unavailable_reason: Option<UnavailableReason>,
+    identity_status: Option<IdentityStatus>,
+    #[serde(default)]
+    variants: Vec<CatalogStatusVariant>,
+    #[serde(default)]
+    artifact_status: ArtifactStatus,
+    #[serde(default)]
+    downloaded: bool,
+    local_path: Option<String>,
+    actual_sha256: Option<String>,
+}
+
+/// 一次模型目录状态检查的远程资源和本地工件快照。
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CatalogInspection {
+    pub(super) version: CatalogVersion,
+    pub(super) remote_status: VersionStatus,
+    pub(super) downloadable: bool,
+    pub(super) unavailable_reason: Option<UnavailableReason>,
+    pub(super) identity_status: Option<IdentityStatus>,
+    pub(super) artifact_status: ArtifactStatus,
+    pub(super) downloaded: bool,
+    pub(super) local_path: Option<String>,
+    pub(super) actual_sha256: Option<String>,
+}
+
+/// 状态接口解释工件暂不可用的原因。
+///
+/// # Examples
+/// 没有 GGUF 时返回 `no_gguf_artifact` 及可读说明。
+///
+/// # Notes
+/// 可下载响应必须省略该原因；不可下载响应必须提供非空原因。
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub(super) struct UnavailableReason {
+    pub(super) code: String,
+    pub(super) message: String,
+}
+
 impl CatalogClient {
+    pub(super) fn http_client(&self) -> &Client {
+        &self.client
+    }
+
+    pub(super) fn router_url(&self) -> Result<Url, ChatError> {
+        self.base.join("/").map_err(|error| {
+            failure(
+                ErrorKind::InvalidParameter,
+                Operation::Generate,
+                format!("主服务地址无效：{error}"),
+            )
+        })
+    }
+
     /// 请求统一主服务，默认跟随 HOST/PORT，可用 BURNCLOUD_SERVER_URL 指向远程主服务。
     ///
     /// # Examples
@@ -264,6 +497,19 @@ impl CatalogClient {
             .map_err(|error| transport(error, Operation::Search))?;
         let download_client = Client::builder()
             .timeout(download_timeout)
+            // 部署请求可能已产生副作用，不能由传输层重发；下载请求共用该策略。
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt
+                    .previous()
+                    .first()
+                    .is_some_and(|url| url.path() == "/console/api/node/deployments")
+                {
+                    attempt.stop()
+                } else {
+                    reqwest::redirect::Policy::limited(10).redirect(attempt)
+                }
+            }))
             .build()
             .map_err(|error| {
                 transport(error, Operation::Initialize(PreparationStage::Downloading))
@@ -292,6 +538,9 @@ impl CatalogClient {
             let items: Vec<CatalogModel> = self
                 .get("/api/models/presets", &[], Operation::Search)
                 .await?;
+            if items.len() != PRESET_CATALOG_COUNT {
+                return Err(invalid_search("预置目录条目数量不是 388 项"));
+            }
             for (index, model) in items.iter().enumerate() {
                 model.validate()?;
                 if !model.preset
@@ -361,16 +610,8 @@ impl CatalogClient {
     pub(super) async fn inspect(
         &self,
         model: &CatalogModel,
-    ) -> Result<(Option<CatalogVersion>, VersionStatus), ChatError> {
+    ) -> Result<CatalogInspection, ChatError> {
         model.validate()?;
-        #[derive(Deserialize)]
-        struct Status {
-            status: VersionStatus,
-            model: String,
-            source: String,
-            revision: String,
-            resource_url: String,
-        }
         let params = if model.preset {
             vec![("preset", model.id.clone())]
         } else {
@@ -380,28 +621,37 @@ impl CatalogClient {
                 ("revision", model.revision.clone()),
             ]
         };
-        let result: Status = self
+        let mut result: CatalogStatusResponse = self
             .get("/api/models/status", &params, Operation::Status)
             .await?;
+        let (variants, verified_variants) = inspect_status_variants(
+            std::mem::take(&mut result.variants),
+            &result.model,
+            &result.source,
+            &result.revision,
+        )?;
+        validate_catalog_status(model, &result, &variants, &verified_variants)?;
         let version = CatalogVersion {
             name: model.name.clone(),
             model: result.model,
             source: result.source,
             revision: result.revision,
             resource_url: result.resource_url,
+            variants,
+            verified_variants,
         };
         version.validate()?;
-        if version.model != model.model
-            || version.source != model.source
-            || version.revision != model.revision
-        {
-            return Err(failure(
-                ErrorKind::InvalidResult,
-                Operation::Status,
-                "状态响应与选中资源不一致".into(),
-            ));
-        }
-        Ok((Some(version), result.status))
+        Ok(CatalogInspection {
+            version,
+            remote_status: result.status,
+            downloadable: result.downloadable,
+            unavailable_reason: result.unavailable_reason,
+            identity_status: result.identity_status,
+            artifact_status: result.artifact_status,
+            downloaded: result.downloaded,
+            local_path: result.local_path,
+            actual_sha256: result.actual_sha256,
+        })
     }
 
     /// 在一次主服务请求中获取硬件快照和全部兼容 Variant。
@@ -410,7 +660,17 @@ impl CatalogClient {
         selection: &CatalogSelection,
     ) -> Result<ModelResolution, ChatError> {
         selection.version.validate()?;
-        let model = selection.version.model.as_str();
+        if selection
+            .preset
+            .as_deref()
+            .is_some_and(|preset_id| !valid_preset_id(preset_id))
+        {
+            return Err(failure(
+                ErrorKind::InvalidParameter,
+                Operation::Resolve,
+                "预置模型标识无效".into(),
+            ));
+        }
         let url = self
             .base
             .join("/api/node/models/resolve")
@@ -429,6 +689,7 @@ impl CatalogClient {
                 model: selection.version.model.clone(),
                 source: selection.version.source.clone(),
                 revision: selection.version.revision.clone(),
+                preset_id: selection.preset.clone(),
             })
             .send()
             .await
@@ -438,89 +699,7 @@ impl CatalogClient {
             .bytes()
             .await
             .map_err(|error| transport(error, Operation::Resolve))?;
-        let envelope: ResolveEnvelope = serde_json::from_slice(&body).map_err(|error| {
-            failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                format!("模型解析接口响应格式无效：{error}"),
-            )
-        })?;
-        if !status.is_success() || !envelope.success {
-            let error = envelope.error.ok_or_else(|| {
-                failure(
-                    ErrorKind::InvalidResult,
-                    Operation::Resolve,
-                    "模型解析失败响应缺少错误信息".into(),
-                )
-            })?;
-            return Err(remote_error(error, Operation::Resolve));
-        }
-        let data = envelope.data.ok_or_else(|| {
-            failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                "模型解析成功响应缺少数据".into(),
-            )
-        })?;
-        if data.model != model || !matches!(data.status.as_str(), "resolved" | "unsupported") {
-            return Err(failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                "模型解析响应与请求不一致".into(),
-            ));
-        }
-        let hardware = data.hardware.into_hardware()?;
-        let model_name = data.model.clone();
-        let variants = data
-            .candidates
-            .into_iter()
-            .map(|candidate| {
-                if candidate.model_name != model_name {
-                    return Err(failure(
-                        ErrorKind::InvalidResult,
-                        Operation::Resolve,
-                        "模型解析候选版本与请求模型不一致".into(),
-                    ));
-                }
-                candidate.into_variant()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let reason = data
-            .reason
-            .map(|reason| format!("{}: {}", reason.code, reason.message));
-        if data.status == "resolved" && variants.is_empty() {
-            return Err(failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                "模型解析成功响应没有候选版本".into(),
-            ));
-        }
-        if data.status == "resolved" && reason.is_some() {
-            return Err(failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                "模型解析成功响应包含不支持原因".into(),
-            ));
-        }
-        if data.status == "unsupported" && !variants.is_empty() {
-            return Err(failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                "模型解析不支持响应包含候选版本".into(),
-            ));
-        }
-        if data.status == "unsupported" && reason.is_none() {
-            return Err(failure(
-                ErrorKind::InvalidResult,
-                Operation::Resolve,
-                "模型解析不支持响应缺少原因".into(),
-            ));
-        }
-        Ok(ModelResolution {
-            hardware,
-            variants,
-            reason,
-        })
+        decode_model_resolution_response(status, &body, selection)
     }
 
     /// 获取主服务 Node 的一次性硬件快照。
@@ -563,6 +742,386 @@ impl CatalogClient {
             )
         })?;
         snapshot.into_hardware()
+    }
+
+    /// 提交并轮询目录模型的异步部署任务。
+    ///
+    /// # Examples
+    ///
+    /// 该调用只提交目录身份和摘要，不把本地路径或数据面令牌交给服务端。
+    ///
+    /// # Notes
+    ///
+    /// 任务必须返回 `ready_to_chat=true` 和服务端生成的 `model_id`；失败不会回退到
+    /// 旧的手动部署接口。
+    #[allow(
+        clippy::too_many_lines,
+        reason = "异步部署轮询必须在同一边界保持任务状态机与响应校验顺序"
+    )]
+    pub(super) async fn deploy_catalog_model(
+        &self,
+        request: &InitializationRequest,
+    ) -> Result<String, ChatError> {
+        let selection = request.model.catalog_selection.as_ref().ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidParameter,
+                Operation::Initialize(PreparationStage::Deploying),
+                "目录部署缺少仓库选择".into(),
+            )
+        })?;
+        let operation = Operation::Initialize(PreparationStage::Deploying);
+        let url = self
+            .base
+            .join("/api/node/models/deployments")
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .download_client
+            .post(url)
+            .header("Accept", "application/json")
+            .json(&AutoDeployRequest {
+                model: &selection.version.model,
+                source: &selection.version.source,
+                revision: &selection.version.revision,
+                variant_id: &request.variant.id,
+                checksum: &request.variant.expected_sha256,
+                backend: "auto",
+            })
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let envelope: AutoDeployEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                format!("异步部署响应格式无效：{error}"),
+            )
+        })?;
+        if !status.is_success() || !envelope.success {
+            let reason = envelope
+                .error
+                .map(|error| error.message)
+                .unwrap_or_else(|| format!("异步部署接口返回 HTTP {status}"));
+            return Err(failure(ErrorKind::ExecutionFailed, operation, reason));
+        }
+        let mut data = envelope.data.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "异步部署成功响应缺少任务数据".into(),
+            )
+        })?;
+        if data.task_id.trim().is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "异步部署响应缺少任务 ID".into(),
+            ));
+        }
+        loop {
+            if data.status == "succeeded" {
+                if !data.ready_to_chat {
+                    return Err(failure(
+                        ErrorKind::ExecutionFailed,
+                        Operation::Initialize(PreparationStage::HealthChecking),
+                        "部署任务已结束但模型当前不可对话".into(),
+                    ));
+                }
+                return data
+                    .deployment
+                    .map(|deployment| deployment.model_id)
+                    .filter(|model_id| !model_id.trim().is_empty())
+                    .ok_or_else(|| {
+                        failure(
+                            ErrorKind::InvalidResult,
+                            Operation::Initialize(PreparationStage::Reporting),
+                            "部署成功响应缺少真实路由模型 ID".into(),
+                        )
+                    });
+            }
+            if matches!(data.status.as_str(), "failed" | "cancelled" | "interrupted") {
+                let reason = data
+                    .error
+                    .map(|error| error.message)
+                    .unwrap_or_else(|| format!("异步部署任务状态为 {}", data.status));
+                return Err(failure(ErrorKind::ExecutionFailed, operation, reason));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut url = self
+                .base
+                .join("/api/node/models/deployments/")
+                .map_err(|error| {
+                    failure(ErrorKind::InvalidParameter, operation, error.to_string())
+                })?;
+            url.path_segments_mut()
+                .map_err(|_| {
+                    failure(
+                        ErrorKind::InvalidParameter,
+                        operation,
+                        "部署任务 URL 无效".into(),
+                    )
+                })?
+                .pop_if_empty()
+                .push(&data.task_id);
+            let response = self
+                .client
+                .get(url)
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|error| transport(error, operation))?;
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|error| transport(error, operation))?;
+            let envelope: AutoDeployEnvelope = serde_json::from_slice(&body).map_err(|error| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    operation,
+                    format!("异步部署查询响应格式无效：{error}"),
+                )
+            })?;
+            if !status.is_success() || !envelope.success {
+                return Err(failure(
+                    ErrorKind::ExecutionFailed,
+                    operation,
+                    envelope
+                        .error
+                        .map(|error| error.message)
+                        .unwrap_or_else(|| format!("异步部署查询返回 HTTP {status}")),
+                ));
+            }
+            data = envelope.data.ok_or_else(|| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    operation,
+                    "异步部署查询缺少任务数据".into(),
+                )
+            })?;
+        }
+    }
+
+    /// 使用已校验的原始模型路径请求一次部署。
+    ///
+    /// # Examples
+    /// 已下载的模型路径可直接传入，不会由客户端裁剪或替换。
+    ///
+    /// # Notes
+    /// 仅接受完整的终态快照；部署可能在超时后继续，不自动重试或跟随重定向。
+    #[allow(dead_code, reason = "下一项后端衔接任务将调用部署边界")]
+    pub(super) async fn deploy_model(&self, model_path: &str) -> Result<(), ChatError> {
+        let operation = Operation::Initialize(PreparationStage::Deploying);
+        if model_path.is_empty() || model_path.contains('\0') {
+            return Err(failure(
+                ErrorKind::InvalidParameter,
+                operation,
+                "模型路径无效".into(),
+            ));
+        }
+        let url = self
+            .base
+            .join("/console/api/node/deployments")
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .download_client
+            .post(url)
+            .header("Accept", "application/json")
+            .json(&DeployRequest { model_path })
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            let reason = match response.bytes().await {
+                Ok(body) => serde_json::from_slice::<DeployError>(&body)
+                    .ok()
+                    .map(|error| error.error)
+                    .filter(|error| !error.trim().is_empty())
+                    .unwrap_or_else(|| format!("部署接口返回 HTTP {status}")),
+                Err(error) => format!("部署接口返回 HTTP {status}，读取错误信息失败：{error}"),
+            };
+            return Err(failure(ErrorKind::ExecutionFailed, operation, reason));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let snapshot: DeploySnapshot = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                format!("部署响应格式无效：{error}"),
+            )
+        })?;
+        if snapshot.model_id.trim().is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "部署响应模型 ID 为空".into(),
+            ));
+        }
+        let _route_status = snapshot.route_status.as_deref();
+        let _route_attachment_id = snapshot.route_attachment_id;
+        let _capacity = snapshot.capacity.as_ref().map(|capacity| {
+            (
+                capacity.total_slots,
+                capacity.free_slots,
+                capacity.observed_at_unix_ms,
+            )
+        });
+        match snapshot.status.as_str() {
+            "ready" => Ok(()),
+            "failed" | "unhealthy" => {
+                let operation = if snapshot.status == "unhealthy" {
+                    Operation::Initialize(PreparationStage::HealthChecking)
+                } else {
+                    operation
+                };
+                let reason = snapshot
+                    .error
+                    .filter(|error| !error.trim().is_empty())
+                    .unwrap_or_else(|| format!("模型部署结果为 {}", snapshot.status));
+                Err(failure(ErrorKind::ExecutionFailed, operation, reason))
+            }
+            _ => Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                format!("部署响应状态无效：{}", snapshot.status),
+            )),
+        }
+    }
+
+    /// 查询已提交部署对应的 Router 准入状态。
+    #[allow(dead_code, reason = "保留旧控制台部署兼容测试边界")]
+    pub(super) async fn deployment_route_status(
+        &self,
+        model_id: &str,
+    ) -> Result<String, ChatError> {
+        let operation = Operation::Initialize(PreparationStage::Reporting);
+        if model_id.trim().is_empty() || model_id.contains('\0') {
+            return Err(failure(
+                ErrorKind::InvalidParameter,
+                operation,
+                "模型 ID 无效".into(),
+            ));
+        }
+        let mut url = self
+            .base
+            .join("/console/api/node/deployments/")
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|_| {
+                failure(
+                    ErrorKind::InvalidParameter,
+                    operation,
+                    "模型 ID URL 无效".into(),
+                )
+            })?
+            .pop_if_empty()
+            .push(model_id);
+        let response = self
+            .client
+            .get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        if !status.is_success() {
+            let reason = serde_json::from_slice::<DeployError>(&body)
+                .ok()
+                .map(|error| error.error)
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or_else(|| format!("部署状态接口返回 HTTP {status}"));
+            return Err(failure(ErrorKind::ExecutionFailed, operation, reason));
+        }
+        let snapshot: DeploySnapshot = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                format!("部署状态响应格式无效：{error}"),
+            )
+        })?;
+        if snapshot.model_id != model_id {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "部署状态响应模型 ID 与请求不一致".into(),
+            ));
+        }
+        let route_status = snapshot.route_status.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "部署状态响应缺少 Router 状态".into(),
+            )
+        })?;
+        if !matches!(
+            route_status.as_str(),
+            "unroutable"
+                | "routable"
+                | "saturated"
+                | "quarantined"
+                | "lost"
+                | "detaching"
+                | "detached"
+                | "failed"
+        ) {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "部署状态响应包含未知 Router 状态".into(),
+            ));
+        }
+        Ok(route_status)
+    }
+
+    /// 在部署完成后有限等待 Router 准入状态收敛。
+    ///
+    /// # Examples
+    /// 首次容量探测暂不可用时，方法会继续查询，直到得到稳定状态或达到等待上限。
+    ///
+    /// # Notes
+    /// 该方法只查询状态，不会停止、重启或撤销 Node 部署；查询失败由调用方按“状态未知”处理。
+    #[allow(dead_code, reason = "保留旧控制台部署兼容测试边界")]
+    pub(super) async fn poll_deployment_route_status(
+        &self,
+        model_id: &str,
+    ) -> Result<String, ChatError> {
+        let mut last_status = None;
+        for attempt in 0..ROUTE_STATUS_POLL_ATTEMPTS {
+            let status = match self.deployment_route_status(model_id).await {
+                Ok(status) => status,
+                Err(_error) if last_status.is_some() => {
+                    // 已经拿到过合法状态时，后续一次查询失败不能把已提交部署
+                    // 误报成失败；保留最近一次 fail-closed 状态供页面展示。
+                    if let Some(status) = last_status.take() {
+                        return Ok(status);
+                    }
+                    return Ok("unroutable".to_string());
+                }
+                Err(error) => return Err(error),
+            };
+            if status != "unroutable" || attempt + 1 == ROUTE_STATUS_POLL_ATTEMPTS {
+                return Ok(status);
+            }
+            last_status = Some(status);
+            tokio::time::sleep(ROUTE_STATUS_POLL_INTERVAL).await;
+        }
+        Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Initialize(PreparationStage::Reporting),
+            "Router 状态轮询未返回结果".into(),
+        ))
     }
 
     async fn create_download_task(
@@ -670,6 +1229,13 @@ impl CatalogClient {
         loop {
             let data = self.get_download_task(task_id).await?;
             let data = map_download_task(data, expected)?;
+            if data.task_id != task_id {
+                return Err(failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Initialize(PreparationStage::Downloading),
+                    "轮询返回了其他下载任务".into(),
+                ));
+            }
             match data.status.as_str() {
                 "queued" | "downloading" => {
                     callback(PreparationEvent::DownloadProgress {
@@ -707,9 +1273,37 @@ impl CatalogClient {
         callback: impl FnMut(PreparationEvent),
     ) -> Result<PreparedModel, ChatError> {
         let operation = Operation::Initialize(PreparationStage::Downloading);
+        let mut callback = callback;
+        if let Some(path) = request
+            .model
+            .catalog_selection
+            .as_ref()
+            .and_then(|s| s.version.verified_path(&request.variant))
+        {
+            let prepared = PreparedModel {
+                route_model_id: None,
+                model: request.model.clone(),
+                variant: request.variant.clone(),
+                actual_sha256: request.variant.expected_sha256.clone(),
+                local_path: path.into(),
+            };
+            if !prepared.is_valid() {
+                return Err(failure(
+                    ErrorKind::InvalidResult,
+                    operation,
+                    "本地工件与选中变体不匹配".into(),
+                ));
+            }
+            callback(PreparationEvent::Downloaded);
+            callback(PreparationEvent::Verified {
+                expected: prepared.actual_sha256.clone(),
+                actual: prepared.actual_sha256.clone(),
+                path: prepared.local_path.clone(),
+            });
+            return Ok(prepared);
+        }
         let initial = self.create_download_task(request).await?;
         let initial = map_download_task(initial, request)?;
-        let mut callback = callback;
         callback(PreparationEvent::DownloadTaskCreated {
             task_id: initial.task_id.clone(),
         });
@@ -778,6 +1372,7 @@ impl CatalogClient {
             path: local_path.clone(),
         });
         Ok(PreparedModel {
+            route_model_id: None,
             model: request.model.clone(),
             variant: request.variant.clone(),
             actual_sha256,
@@ -834,6 +1429,103 @@ struct ResolveModelRequest {
     model: String,
     source: String,
     revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset_id: Option<String>,
+}
+
+fn decode_model_resolution_response(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    selection: &CatalogSelection,
+) -> Result<ModelResolution, ChatError> {
+    let envelope: ResolveEnvelope = serde_json::from_slice(body).map_err(|error| {
+        failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            format!("模型解析接口响应格式无效：{error}"),
+        )
+    })?;
+    if !status.is_success() || !envelope.success {
+        let error = envelope.error.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                Operation::Resolve,
+                "模型解析失败响应缺少错误信息".into(),
+            )
+        })?;
+        return Err(remote_error(error, Operation::Resolve));
+    }
+    let data = envelope.data.ok_or_else(|| {
+        failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            "模型解析成功响应缺少数据".into(),
+        )
+    })?;
+    let model = selection.version.model.as_str();
+    if data.model != model || !matches!(data.status.as_str(), "resolved" | "unsupported") {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            "模型解析响应与请求不一致".into(),
+        ));
+    }
+    let hardware = data.hardware.into_hardware()?;
+    let model_name = data.model.clone();
+    let variants = data
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            if candidate.model_name != model_name {
+                return Err(failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Resolve,
+                    "模型解析候选版本与请求模型不一致".into(),
+                ));
+            }
+            candidate.into_variant(
+                &selection.version.source,
+                model,
+                &selection.version.revision,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let reason = data
+        .reason
+        .map(|reason| format!("{}: {}", reason.code, reason.message));
+    if data.status == "resolved" && variants.is_empty() {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            "模型解析成功响应没有候选版本".into(),
+        ));
+    }
+    if data.status == "resolved" && reason.is_some() {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            "模型解析成功响应包含不支持原因".into(),
+        ));
+    }
+    if data.status == "unsupported" && !variants.is_empty() {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            "模型解析不支持响应包含候选版本".into(),
+        ));
+    }
+    if data.status == "unsupported" && reason.is_none() {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Resolve,
+            "模型解析不支持响应缺少原因".into(),
+        ));
+    }
+    Ok(ModelResolution {
+        hardware,
+        variants,
+        reason,
+    })
 }
 
 impl RemoteHardwareSnapshot {
@@ -851,7 +1543,11 @@ impl RemoteHardwareSnapshot {
                 ));
             }
         };
-        if self.cpu.trim().is_empty() || self._arch.trim().is_empty() {
+        if self.cpu.trim().is_empty()
+            || self._arch.trim().is_empty()
+            || self.memory_bytes == 0
+            || self.disk_available_bytes == 0
+        {
             return Err(failure(
                 ErrorKind::InvalidResult,
                 Operation::Hardware,
@@ -875,13 +1571,20 @@ impl RemoteHardwareSnapshot {
 }
 
 impl RemoteModelCandidate {
-    fn into_variant(self) -> Result<ModelVariant, ChatError> {
+    fn into_variant(
+        self,
+        source: &str,
+        model: &str,
+        revision: &str,
+    ) -> Result<ModelVariant, ChatError> {
         if self.model_name.trim().is_empty()
             || self.variant_id.trim().is_empty()
             || self.quantization.trim().is_empty()
             || self.runtime.trim().is_empty()
-            || self.artifact_uri.trim().is_empty()
+            || !valid_artifact_url(&self.artifact_uri, model, source, revision)
             || !valid_digest(&self.checksum)
+            || self.min_ram_bytes == 0
+            || self.disk_size_bytes == 0
         {
             return Err(failure(
                 ErrorKind::InvalidResult,
@@ -898,6 +1601,7 @@ impl RemoteModelCandidate {
             ram_bytes: self.min_ram_bytes,
             vram_bytes: self.min_vram_bytes,
             disk_bytes: self.disk_size_bytes,
+            file_size_bytes: None,
         })
     }
 }
@@ -983,6 +1687,139 @@ fn parse_snapshot(bytes: &[u8]) -> Result<CatalogPage<CatalogModel>, ChatError> 
     Ok(snapshot)
 }
 
+fn inspect_status_variants(
+    entries: Vec<CatalogStatusVariant>,
+    model: &str,
+    source: &str,
+    revision: &str,
+) -> Result<(Vec<ModelVariant>, Vec<VerifiedVariant>), ChatError> {
+    let mut variants = Vec::new();
+    let mut verified_variants = Vec::new();
+    for entry in entries {
+        let valid_variant = entry.variant.file_size_bytes.is_some_and(|size| size > 0)
+            && !entry.variant.id.trim().is_empty()
+            && !entry.variant.quantization.trim().is_empty()
+            && !entry.variant.runtime.trim().is_empty()
+            && valid_artifact_url(&entry.variant.artifact_source, model, source, revision)
+            && valid_digest(&entry.variant.expected_sha256)
+            && entry.variant.ram_bytes > 0
+            && entry.variant.disk_bytes > 0;
+        if !valid_variant
+            || variants
+                .iter()
+                .any(|variant: &ModelVariant| variant.id == entry.variant.id)
+        {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Status,
+                "状态响应包含无效或重复的工件变体".into(),
+            ));
+        }
+        if entry.downloaded != (entry.artifact_status == ArtifactStatus::Downloaded)
+            || (entry.downloaded
+                && entry
+                    .local_path
+                    .as_deref()
+                    .is_none_or(|path| path.trim().is_empty() || path.contains('\0')))
+            || (entry.downloaded
+                && entry.actual_sha256.as_deref().is_none_or(|sha| {
+                    !valid_digest(sha) || !sha.eq_ignore_ascii_case(&entry.variant.expected_sha256)
+                }))
+            || (!entry.downloaded && (entry.local_path.is_some() || entry.actual_sha256.is_some()))
+        {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                Operation::Status,
+                "状态响应包含不完整或不匹配的本地工件凭据".into(),
+            ));
+        }
+        if entry.downloaded {
+            let (path, sha256) = entry.local_path.zip(entry.actual_sha256).ok_or_else(|| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    Operation::Status,
+                    "已下载变体缺少有效的工件凭据".into(),
+                )
+            })?;
+            verified_variants.push(VerifiedVariant {
+                id: entry.variant.id.clone(),
+                uri: entry.variant.artifact_source.clone(),
+                sha256,
+                path,
+            });
+        }
+        variants.push(entry.variant);
+    }
+    Ok((variants, verified_variants))
+}
+
+fn validate_catalog_status(
+    model: &CatalogModel,
+    result: &CatalogStatusResponse,
+    variants: &[ModelVariant],
+    verified_variants: &[VerifiedVariant],
+) -> Result<(), ChatError> {
+    let has_verified_variants = !verified_variants.is_empty();
+    let top_receipt_matches = result
+        .local_path
+        .as_deref()
+        .zip(result.actual_sha256.as_deref())
+        .is_some_and(|(path, sha)| {
+            verified_variants
+                .iter()
+                .any(|verified| verified.path == path && verified.sha256.eq_ignore_ascii_case(sha))
+        });
+    let invalid = result.model != model.model
+        || result.source != model.source
+        || result.revision != model.revision
+        || result.identity_status != model.identity_status
+        || (result.downloadable && result.unavailable_reason.is_some())
+        || (!result.downloadable
+            && result.unavailable_reason.as_ref().is_none_or(|reason| {
+                reason.code.trim().is_empty() || reason.message.trim().is_empty()
+            }))
+        || (result.downloadable && variants.is_empty())
+        || (result.identity_status == Some(IdentityStatus::PendingValidation)
+            && (result.downloadable || !variants.is_empty()))
+        || result.downloaded != (result.artifact_status == ArtifactStatus::Downloaded)
+        || result.downloaded != has_verified_variants
+        || (result.downloaded
+            && (result
+                .local_path
+                .as_deref()
+                .is_none_or(|path| path.trim().is_empty() || path.contains('\0'))
+                || result
+                    .actual_sha256
+                    .as_deref()
+                    .is_none_or(|digest| !valid_digest(digest))
+                || !top_receipt_matches))
+        || (!result.downloaded && (result.local_path.is_some() || result.actual_sha256.is_some()))
+        || result
+            .actual_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_digest(digest));
+    if invalid {
+        return Err(failure(
+            ErrorKind::InvalidResult,
+            Operation::Status,
+            "状态响应与选中资源不一致".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_preset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !matches!(id, "." | "..")
+        && id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+        && id
+            .split_once("-row-")
+            .is_none_or(|(_, row)| !row.is_empty() && row.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 fn valid_resource(model: &str, source: &str, revision: &str) -> bool {
     let safe = |part: &str| {
         !part.is_empty()
@@ -1003,19 +1840,55 @@ impl CatalogModel {
     /// 在 HTTP 响应边界验证展示项及其资源绑定。
     ///
     /// # Examples
-    /// 无来源或含路径跳转的仓库必须拒收。
+    /// 无来源、含路径跳转的仓库或非 HTTP(S) 链接必须拒收。
     ///
     /// # Notes
-    /// 不把缺失字段补成虚构仓库。
+    /// 重复预置仓库以原表行号区分；搜索项仍严格使用仓库短名作为标识。
     pub(super) fn validate(&self) -> Result<(), ChatError> {
         let id_matches_model = self
             .model
             .rsplit('/')
             .next()
             .is_some_and(|name| name.to_ascii_lowercase() == self.id);
+        let preset_id_valid = valid_preset_id(&self.id);
+        let link_valid = self.resource_url.as_ref().is_none_or(|link| {
+            Url::parse(link).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+            })
+        });
+        let hardware_valid = self.hardware.as_ref().is_some_and(|hardware| {
+            [
+                &hardware.vram_min,
+                &hardware.ram_min,
+                &hardware.disk_min,
+                &hardware.vram_recommended,
+                &hardware.ram_recommended,
+                &hardware.disk_recommended,
+            ]
+            .into_iter()
+            .all(|value| {
+                value.strip_suffix('G').is_some_and(|number| {
+                    !number.is_empty()
+                        && number
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                        && number.bytes().filter(|byte| *byte == b'.').count() <= 1
+                        && number
+                            .parse::<f64>()
+                            .is_ok_and(|parsed| parsed.is_finite() && parsed > 0.0)
+                })
+            })
+        });
         if self.name.trim().is_empty()
             || !valid_resource(&self.model, &self.source, &self.revision)
+            || (self.preset && !preset_id_valid)
             || (!self.preset && !id_matches_model)
+            || (self.preset && (self.identity_status.is_none() || !hardware_valid))
+            || (!self.preset && (self.identity_status.is_some() || self.hardware.is_some()))
+            || !link_valid
         {
             return Err(invalid_search("模型目录条目无效或资源不完整"));
         }
@@ -1024,6 +1897,18 @@ impl CatalogModel {
 }
 
 impl CatalogVersion {
+    /// 只复用同一仓库修订下 ID、URI、摘要同时匹配的已校验工件。
+    pub(super) fn verified_path(&self, variant: &ModelVariant) -> Option<&str> {
+        self.verified_variants
+            .iter()
+            .find(|r| {
+                r.id == variant.id
+                    && r.uri == variant.artifact_source
+                    && r.sha256.eq_ignore_ascii_case(&variant.expected_sha256)
+            })
+            .map(|r| r.path.as_str())
+    }
+
     /// 验证仓库快照可交接，且资源页面为 HTTP(S) 地址。
     ///
     /// # Examples
@@ -1038,9 +1923,25 @@ impl CatalogVersion {
                 && url.username().is_empty()
                 && url.password().is_none()
         });
+        let variants_valid = self.variants.iter().all(|variant| {
+            !variant.id.trim().is_empty()
+                && !variant.quantization.trim().is_empty()
+                && !variant.runtime.trim().is_empty()
+                && valid_digest(&variant.expected_sha256)
+                && variant.file_size_bytes.is_none_or(|size| size > 0)
+                && variant.ram_bytes > 0
+                && variant.disk_bytes > 0
+                && valid_artifact_url(
+                    &variant.artifact_source,
+                    &self.model,
+                    &self.source,
+                    &self.revision,
+                )
+        });
         if self.name.trim().is_empty()
             || !valid_resource(&self.model, &self.source, &self.revision)
             || !url_ok
+            || !variants_valid
         {
             return Err(failure(
                 ErrorKind::InvalidResult,
@@ -1050,6 +1951,45 @@ impl CatalogVersion {
         }
         Ok(())
     }
+}
+
+fn valid_artifact_url(value: &str, model: &str, source: &str, revision: &str) -> bool {
+    let Some((owner, name)) = model.split_once('/') else {
+        return false;
+    };
+    let (host, prefix): (&str, Vec<&str>) = match source {
+        "modelscope" => (
+            "modelscope.cn",
+            vec!["models", owner, name, "resolve", revision],
+        ),
+        "hf-mirror" => ("hf-mirror.com", vec![owner, name, "resolve", revision]),
+        "huggingface" => ("huggingface.co", vec![owner, name, "resolve", revision]),
+        _ => return false,
+    };
+    Url::parse(value).is_ok_and(|url| {
+        if url.scheme() != "https"
+            || url.host_str() != Some(host)
+            || url.port().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return false;
+        }
+        let Some(segments) = url.path_segments() else {
+            return false;
+        };
+        let segments = segments.collect::<Vec<_>>();
+        segments.len() > prefix.len()
+            && segments[..prefix.len()] == prefix
+            && segments[prefix.len()..]
+                .iter()
+                .all(|segment| !segment.is_empty() && !matches!(*segment, "." | ".."))
+            && segments
+                .last()
+                .is_some_and(|file| file.to_ascii_lowercase().ends_with(".gguf"))
+    })
 }
 
 impl<T> CatalogPage<T> {
@@ -1222,13 +2162,12 @@ fn map_download_task(
 }
 
 fn download_task_terminal_error(data: &DownloadTaskData, operation: Operation) -> ChatError {
+    if data.status == "cancelled" {
+        return failure(ErrorKind::Cancelled, operation, "模型下载任务已取消".into());
+    }
     let error = data.error.clone().unwrap_or_else(|| RemoteHardwareError {
         code: "download_failed".into(),
-        message: if data.status == "cancelled" {
-            "模型下载任务已取消".into()
-        } else {
-            "模型文件下载失败".into()
-        },
+        message: "模型文件下载失败".into(),
     });
     let mut mapped = download_error(error);
     if matches!(mapped.operation, Operation::Initialize(_)) {

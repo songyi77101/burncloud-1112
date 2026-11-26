@@ -2573,12 +2573,22 @@ async fn proxy_logic(
         };
     }
 
-    // Preflight billing check: reject requests for models with no price configured.
-    // In strict mode (default), returns 400 to prevent unbilled usage.
-    // In non-strict mode, only warns and allows the request through.
+    // 本地纯路由没有第三方上游成本；缺报价时仅放行完全由受管本地挂载组成的候选集。
+    // 只要候选中含外部供给，仍执行严格计费门禁，避免把缺价请求转发给付费上游。
+    let local_only_candidates = !local_candidates.is_empty()
+        && candidates.iter().all(|candidate| {
+            candidate
+                .id
+                .parse::<i32>()
+                .ok()
+                .is_some_and(|id| local_candidates.contains(&id))
+        });
+
+    // In strict mode (default), reject unpriced external requests. A local-only
+    // route is allowed because BurnCloud does not incur a provider charge there.
     if let Some(model) = model_name {
         if let Err(e) = state.cost_calculator.preflight(model, None).await {
-            if state.billing_strict {
+            if state.billing_strict && !local_only_candidates {
                 tracing::warn!(model = %model, "Preflight billing check failed — rejecting request: {e}");
                 state
                     .billing_preflight_rejected_count
@@ -2603,6 +2613,8 @@ async fn proxy_logic(
                     error_type: Some("router_reject".to_string()),
                     request_log_data: None,
                 };
+            } else if local_only_candidates {
+                tracing::info!(model = %model, "Allowing unpriced local-only inference; no provider charge applies");
             } else {
                 tracing::warn!(model = %model, "Preflight billing check failed — non-strict mode, allowing request: {e}");
             }

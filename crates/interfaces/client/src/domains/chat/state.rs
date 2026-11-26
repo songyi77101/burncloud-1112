@@ -305,6 +305,7 @@ impl ChatState {
                 variant_id: None,
                 actual_digest: None,
                 local_path: None,
+                route_status: None,
                 error: None,
                 collapsed: false,
             };
@@ -339,14 +340,16 @@ impl ChatState {
         status: VersionStatus,
         variants: Vec<ModelVariant>,
     ) -> Option<u64> {
+        let has_verified_variant = !selection.version.verified_variants.is_empty();
         if self.is_busy()
             || self.status_loading
             || selection.name.trim().is_empty()
             || selection.version.validate().is_err()
-            || !matches!(
-                status,
-                VersionStatus::Downloadable | VersionStatus::Available
-            )
+            || (!has_verified_variant
+                && !matches!(
+                    status,
+                    VersionStatus::Downloadable | VersionStatus::Available
+                ))
         {
             return None;
         }
@@ -369,7 +372,7 @@ impl ChatState {
         if !self.set_model(&id) {
             return None;
         }
-        if status == VersionStatus::Available {
+        if status == VersionStatus::Available && !has_verified_variant {
             self.fail_preparation(ChatError {
                 kind: ErrorKind::NotConnected,
                 operation: Operation::Status,
@@ -566,6 +569,7 @@ impl ChatState {
         preparation.variant_id = None;
         preparation.actual_digest = None;
         preparation.local_path = None;
+        preparation.route_status = None;
         preparation.error = None;
         preparation.collapsed = false;
         self.close_menus();
@@ -707,6 +711,12 @@ impl ChatState {
         run_id: u64,
         result: Result<ModelResolution, ChatError>,
     ) {
+        if !self
+            .preparation()
+            .is_some_and(|p| p.run_id == run_id && p.stage == PreparationStage::Detecting)
+        {
+            return;
+        }
         let resolution = match result {
             Ok(resolution) => resolution,
             Err(error) => {
@@ -813,26 +823,29 @@ impl ChatState {
             PreparationEvent::DownloadProgress { completed, total }
                 if p.stage == PreparationStage::Downloading =>
             {
-                if *completed < p.completed_bytes
-                    || total.is_some_and(|total| total == 0 || *completed > total)
-                    || (p.total_bytes.is_some() && p.total_bytes != *total)
-                {
+                if total.is_some_and(|size| size == 0 || *completed > size) {
                     false
                 } else {
-                    p.completed_bytes = *completed;
-                    p.total_bytes = *total;
+                    p.completed_bytes = p.completed_bytes.max(*completed);
+                    p.total_bytes = p
+                        .total_bytes
+                        .max(*total)
+                        .map(|size| size.max(p.completed_bytes));
                     true
                 }
             }
             PreparationEvent::Downloaded if p.stage == PreparationStage::Downloading => {
-                if p.total_bytes
-                    .is_some_and(|total| total != p.completed_bytes)
-                {
-                    false
-                } else {
-                    p.stage = PreparationStage::Verifying;
-                    true
-                }
+                // 下载器完成事件是校验阶段的唯一边界；进度快照可能来自较早的轮询，
+                // 不能因为一次暂时落后的 completed_bytes 阻断摘要校验。
+                p.completed_bytes = p.total_bytes.unwrap_or(p.completed_bytes);
+                p.stage = PreparationStage::Verifying;
+                true
+            }
+            PreparationEvent::DownloadProgress { completed, total }
+                if p.stage == PreparationStage::Verifying =>
+            {
+                // 校验阶段不再修改下载进度，但允许合法的迟到快照通过，避免轮询竞态误报非法状态。
+                total.is_none_or(|total| total > 0 && *completed <= total)
             }
             PreparationEvent::Verified {
                 expected,
@@ -855,6 +868,8 @@ impl ChatState {
                 }
                 p.actual_digest = Some(actual.clone());
                 p.local_path = Some(path.clone());
+                // 下载已完成，不再对它发出远端取消请求。
+                p.download_task_id = None;
                 p.stage = if p.model.catalog_selection.is_some() {
                     PreparationStage::ArtifactReady
                 } else {
@@ -906,8 +921,17 @@ impl ChatState {
             if preparation.run_id != run_id || !preparation.stage.is_running() {
                 return None;
             }
+            let downloading = matches!(
+                preparation.stage,
+                PreparationStage::Downloading | PreparationStage::Verifying
+            );
             preparation.stage = PreparationStage::Cancelled;
-            preparation.download_task_id.take()
+            let task_id = preparation.download_task_id.take();
+            if downloading {
+                task_id
+            } else {
+                None
+            }
         };
         self.restore_pending_draft();
         task_id
@@ -940,6 +964,126 @@ impl ChatState {
         self.restore_pending_draft();
         true
     }
+    /// 原子认领当前目录工件，防止同一运行重复部署。
+    ///
+    /// # Examples
+    /// 下载成功后使用该运行的原始凭据认领，再发起部署。
+    ///
+    /// # Notes
+    /// 过期或重复结果无副作用，当前凭据不一致则记录失败。
+    #[allow(dead_code, reason = "页面协调任务将调用此状态边界")]
+    pub(super) fn begin_catalog_deployment(
+        &mut self,
+        run_id: u64,
+        prepared: &PreparedModel,
+    ) -> bool {
+        let Some(p) = self.preparation_mut() else {
+            return false;
+        };
+        if p.run_id != run_id
+            || p.stage != PreparationStage::ArtifactReady
+            || p.model.catalog_selection.is_none()
+        {
+            return false;
+        }
+        let valid = prepared.is_valid()
+            && prepared.model == p.model
+            && Some(&prepared.variant) == p.variant()
+            && p.actual_digest
+                .as_ref()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&prepared.actual_sha256))
+            && p.local_path.as_ref() == Some(&prepared.local_path);
+        if !valid {
+            self.invalid_preparation("部署凭据与下载模型、版本、摘要或路径不一致");
+            return false;
+        }
+        p.stage = PreparationStage::Deploying;
+        true
+    }
+
+    /// 消费当前运行的部署结果并按健康状态登记已就绪模型。
+    ///
+    /// # Examples
+    /// 部署成功时仅当前运行的凭据可登记就绪。
+    ///
+    /// # Notes
+    /// 取消或新运行之后到达的旧结果被忽略，不恢复草稿或更改句柄。
+    #[allow(dead_code, reason = "页面协调任务将调用此状态边界")]
+    pub(super) fn finish_catalog_deployment(
+        &mut self,
+        run_id: u64,
+        prepared: PreparedModel,
+        result: Result<(), ChatError>,
+    ) -> Option<GenerationPlan> {
+        let p = self.preparation_mut()?;
+        if p.run_id != run_id
+            || p.stage != PreparationStage::Deploying
+            || p.model.catalog_selection.is_none()
+        {
+            return None;
+        }
+        let valid = prepared.is_valid()
+            && prepared.model == p.model
+            && Some(&prepared.variant) == p.variant()
+            && p.actual_digest
+                .as_ref()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&prepared.actual_sha256))
+            && p.local_path.as_ref() == Some(&prepared.local_path);
+        if !valid {
+            self.invalid_preparation("部署结果凭据与当前运行不一致");
+            return None;
+        }
+        if let Err(mut error) = result {
+            if error.operation == Operation::Initialize(PreparationStage::HealthChecking) {
+                p.stage = PreparationStage::HealthChecking;
+            } else {
+                error.operation = Operation::Initialize(PreparationStage::Deploying);
+            }
+            self.fail_preparation(error);
+            return None;
+        }
+        p.stage = PreparationStage::HealthChecking;
+        p.stage = PreparationStage::Ready;
+        // 解析出的版本此前只保存在流程卡片中，就绪查询还依赖模型目录中的同一版本。
+        if let Some(model) = self
+            .models
+            .iter_mut()
+            .find(|model| model.id == prepared.model.id)
+        {
+            *model = prepared.model.clone();
+        }
+        self.record_ready(prepared);
+        if let Some(draft) = self.pending_draft.take() {
+            self.draft = draft;
+            return self.begin_generation();
+        }
+        None
+    }
+
+    /// 更新当前目录部署的 Router 准入状态；状态查询失败不改变已就绪结果。
+    #[allow(dead_code, reason = "旧部署路由状态兼容测试仍覆盖该状态边界")]
+    pub(super) fn set_deployment_route_status(&mut self, run_id: u64, route_status: String) {
+        let Some(preparation) = self.preparation_mut() else {
+            return;
+        };
+        if preparation.run_id != run_id || preparation.stage != PreparationStage::Ready {
+            return;
+        }
+        if matches!(
+            route_status.as_str(),
+            "unroutable"
+                | "routable"
+                | "saturated"
+                | "quarantined"
+                | "lost"
+                | "detaching"
+                | "detached"
+                | "failed"
+        ) {
+            preparation.route_status = Some(route_status);
+        }
+    }
+
     /// 最终返回值与全部阶段凭据一致才能记录就绪；目录模型只停在文件已就绪。
     pub(super) fn finish_preparation(
         &mut self,
@@ -955,6 +1099,10 @@ impl ChatState {
         }
         let ready = match result {
             Ok(value) => value,
+            Err(error) if error.kind == ErrorKind::Cancelled => {
+                self.request_preparation_cancel(run_id);
+                return None;
+            }
             Err(error) => {
                 self.fail_preparation(error);
                 return None;
@@ -987,7 +1135,6 @@ impl ChatState {
             return None;
         }
         if is_catalog_model {
-            self.restore_pending_draft();
             return None;
         }
         p.stage = PreparationStage::Ready;

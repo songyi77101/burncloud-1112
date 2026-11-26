@@ -441,18 +441,45 @@ impl CatalogServer {
                     if fail.swap(false, Ordering::SeqCst) {
                         (503, json!({"message":"失败"}))
                     } else {
-                        (
-                            200,
-                            json!([{"id":"test-1","name":"测试型号","preset":true,"model":"owner/Test-1","revision":"master","source":"modelscope"}]),
-                        )
+                        let items = (0..388)
+                            .map(|index| {
+                                let id = if index == 0 {
+                                    "qwen3-8b".to_string()
+                                } else {
+                                    format!("test-1-row-{index}")
+                                };
+                                json!({"id":id,"name":"测试型号","preset":true,"identity_status":"verified",
+                                    "model":"owner/Test-1","revision":"master","source":"modelscope",
+                                    "resource_url":"https://www.modelscope.cn/models/owner/Test-1",
+                                    "hardware":{"vram_min":"6.00G","ram_min":"12.00G","disk_min":"6.00G","vram_recommended":"8.00G","ram_recommended":"16.00G","disk_recommended":"8.00G"}})
+                            })
+                            .collect::<Vec<_>>();
+                        (200, json!(items))
                     }
                 } else if request.contains("/api/models/status?") {
                     if fail_status {
                         (503, json!({"message":"状态失败"}))
                     } else {
+                        let downloadable = status == "downloadable";
+                        let variants = if downloadable {
+                            vec![
+                                json!({"id":"test-q4.gguf","quantization":"Q4_K_M","runtime":"llama.cpp",
+                                "artifact_source":"https://modelscope.cn/models/owner/Test-1/resolve/master/test-q4.gguf",
+                                "expected_sha256":format!("sha256:{}", "a".repeat(64)),"file_size_bytes":1024,
+                                "ram_bytes":2048,"vram_bytes":0,"disk_bytes":1024,
+                                "artifact_status":"not_downloaded","downloaded":false,"local_path":null,"actual_sha256":null}),
+                            ]
+                        } else {
+                            Vec::new()
+                        };
                         (
                             200,
-                            json!({"status":status,"model":"owner/Test-1","revision":"master","source":"modelscope","resource_url":"https://modelscope.cn/models/owner/Test-1/files?Revision=master"}),
+                            json!({"status":status,"model":"owner/Test-1","revision":"master","source":"modelscope",
+                                "resource_url":"https://modelscope.cn/models/owner/Test-1/files?Revision=master",
+                                "downloadable":downloadable,
+                                "unavailable_reason":if downloadable {None} else {Some(json!({"code":"no_gguf_artifact","message":"无可下载工件"}))},
+                                "identity_status":"verified","artifact_status":"not_downloaded","downloaded":false,
+                                "local_path":null,"actual_sha256":null,"variants":variants}),
                         )
                     }
                 } else {
@@ -505,7 +532,7 @@ impl Ui {
             probe.attributes.values().any(|attrs| {
                 attrs
                     .get("aria-label")
-                    .is_some_and(|label| label == "下载" || label == "使用此版本")
+                    .is_some_and(|label| label == "选择并检查硬件兼容性")
             })
         })
         .await;
@@ -518,14 +545,30 @@ async fn catalog_handoff_detects_once_and_stops_without_artifact_or_deployment()
     let mut ui = Ui::catalog(backend.clone(), service.client.clone());
     ui.input("输入消息或指令", "目录草稿");
     ui.preview_catalog().await;
+    for text in [
+        "显存 6.00G",
+        "内存 12.00G",
+        "磁盘 6.00G",
+        "显存 8.00G",
+        "内存 16.00G",
+        "磁盘 8.00G",
+    ] {
+        assert!(ui.probe.text.contains(text), "缺少硬件配置：{text}");
+    }
+    assert!(ui.probe.attributes.values().any(|attrs| {
+        attrs
+            .get("href")
+            .is_some_and(|href| href == "https://www.modelscope.cn/models/owner/Test-1")
+            && attrs.get("target").is_some_and(|target| target == "_blank")
+            && attrs
+                .get("rel")
+                .is_some_and(|rel| rel == "noopener noreferrer")
+    }));
     assert!(backend.calls.borrow().is_empty());
-    ui.label("下载");
+    ui.label("选择并检查硬件兼容性");
     ui.wait_for(|probe| probe.text.contains("尚未接入该仓库版本的工件解析与部署"))
         .await;
-    assert!(ui
-        .probe
-        .static_text
-        .contains("硬件检测、模型下载和 SHA-256 摘要校验由 Node 服务完成"));
+    assert!(ui.probe.text.contains("模型下载、校验或部署失败。"));
     assert!(!ui
         .probe
         .static_text
@@ -545,8 +588,9 @@ async fn catalog_handoff_detects_once_and_stops_without_artifact_or_deployment()
         .any(|call| call.contains("/api/models/presets")));
     assert!(calls
         .iter()
-        .any(|call| call.contains("/api/models/status?preset=test-1")));
+        .any(|call| call.contains("/api/models/status?preset=qwen3-8b")));
 }
+
 #[tokio::test]
 async fn catalog_status_failure_keeps_chat_model_and_allows_retry() {
     let service = CatalogServer::start("downloadable", false, true).await;
@@ -602,15 +646,9 @@ async fn catalog_search_failure_retry_and_close_do_not_change_chat_model() {
         ui.label("重试模型查询");
         ui.wait_for(|probe| probe.text.contains("测试型号")).await;
         ui.click("chat-model-option");
-        // 行内出现操作即表示状态已返回，预览仍不能提交聊天模型。
-        ui.wait_for(|probe| {
-            probe.attributes.values().any(|attrs| {
-                attrs
-                    .get("aria-label")
-                    .is_some_and(|label| label == "使用此版本")
-            })
-        })
-        .await;
+        // 没有通过校验的 GGUF 工件时，应展示不可用原因而不是确认入口。
+        ui.wait_for(|probe| probe.text.contains("无可下载工件"))
+            .await;
         ui.label("关闭模型菜单");
         let input = ui.probe.find("aria-label", "输入消息或指令", "input");
         let attrs = &ui.probe.attributes[&input.0];
@@ -626,13 +664,20 @@ async fn catalog_search_failure_retry_and_close_do_not_change_chat_model() {
     }
 }
 #[tokio::test]
-async fn catalog_available_uses_version_but_does_not_fake_ready_credentials() {
+async fn catalog_without_verified_artifact_cannot_be_confirmed() {
     let service = CatalogServer::start("available", false, false).await;
     let backend = Rc::new(ControlledBackend::default());
     let mut ui = Ui::catalog(backend.clone(), service.client.clone());
-    ui.preview_catalog().await;
-    ui.label("使用此版本");
-    assert!(ui.probe.text.contains("尚未接入该版本的运行后端"));
+    ui.click("chat-model-trigger");
+    ui.wait_for(|probe| probe.text.contains("测试型号")).await;
+    ui.click("chat-model-option");
+    ui.wait_for(|probe| probe.text.contains("无可下载工件"))
+        .await;
+    assert!(!ui.probe.attributes.values().any(|attrs| {
+        attrs
+            .get("aria-label")
+            .is_some_and(|label| label == "选择并检查硬件兼容性")
+    }));
     ui.send();
     assert!(backend.calls.borrow().is_empty());
     assert!(!service
@@ -682,7 +727,20 @@ impl PendingCatalog {
                         if count == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
                     }
                     if String::from_utf8_lossy(&request).contains("/api/models/presets") {
-                        let body = json!([{"id":"test-1","name":"测试型号","preset":true,"model":"owner/Test-1","source":"modelscope","revision":"master"}]).to_string();
+                        let items = (0..388)
+                            .map(|index| {
+                                let id = if index == 0 {
+                                    "qwen3-8b".to_string()
+                                } else {
+                                    format!("test-1-row-{index}")
+                                };
+                                json!({"id":id,"name":"测试型号","preset":true,"identity_status":"verified",
+                                    "model":"owner/Test-1","source":"modelscope","revision":"master",
+                                    "hardware":{"vram_min":"4G","ram_min":"8G","disk_min":"4G",
+                                        "vram_recommended":"8G","ram_recommended":"16G","disk_recommended":"8G"}})
+                            })
+                            .collect::<Vec<_>>();
+                        let body = json!(items).to_string();
                         stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.expect("返回预置");
                     } else {
                         stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").await.expect("悬挂响应头");
@@ -742,4 +800,243 @@ async fn switching_queries_status_and_closing_picker_cancel_http_requests() {
     ui.wait_for(|_| service.closed.load(Ordering::SeqCst) == 4)
         .await;
     assert!(backend.calls.borrow().is_empty());
+}
+
+#[derive(Default)]
+struct DeploymentBackend {
+    calls: Rc<RefCell<Vec<String>>>,
+    mismatch: bool,
+    hold: bool,
+    dropped: Rc<Cell<bool>>,
+}
+impl ChatBackend for DeploymentBackend {
+    fn search(&self, _: String) -> BackendFuture<Vec<ChatModel>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn model_status(&self, _: String) -> BackendFuture<Vec<PreparedModel>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn detect_hardware(&self, _: Callback<HardwareEvent>) -> BackendFuture<DemoHardware> {
+        Box::pin(async { Ok(hardware(DemoPlatform::Windows)) })
+    }
+    fn resolve_catalog_model(
+        &self,
+        _: CatalogSelection,
+        _: Callback<HardwareEvent>,
+    ) -> BackendFuture<ModelResolution> {
+        Box::pin(async {
+            Ok(ModelResolution {
+                hardware: hardware(DemoPlatform::Windows),
+                variants: vec![ModelVariant {
+                    id: "q4".into(),
+                    quantization: "q4".into(),
+                    runtime: "llama.cpp".into(),
+                    artifact_source: "https://example.invalid/model.gguf".into(),
+                    expected_sha256: DEMO_DIGEST.into(),
+                    ram_bytes: GIB,
+                    vram_bytes: 0,
+                    disk_bytes: GIB,
+                    file_size_bytes: None,
+                }],
+                reason: None,
+            })
+        })
+    }
+    fn initialize(
+        &self,
+        request: InitializationRequest,
+        mut callback: Callback<PreparationEvent>,
+    ) -> BackendFuture<PreparedModel> {
+        self.calls.borrow_mut().push("initialize".into());
+        let mismatch = self.mismatch;
+        Box::pin(async move {
+            callback(PreparationEvent::DownloadTaskCreated {
+                task_id: "42".into(),
+            });
+            callback(PreparationEvent::Downloaded);
+            callback(PreparationEvent::Verified {
+                expected: DEMO_DIGEST.into(),
+                actual: DEMO_DIGEST.into(),
+                path: "path.gguf".into(),
+            });
+            Ok(PreparedModel {
+                route_model_id: None,
+                model: request.model,
+                variant: request.variant,
+                actual_sha256: DEMO_DIGEST.into(),
+                local_path: if mismatch { "other.gguf" } else { "path.gguf" }.into(),
+            })
+        })
+    }
+    fn deploy_model(&self, path: String) -> BackendFuture<()> {
+        self.calls.borrow_mut().push(format!("deploy:{path}"));
+        let hold = self.hold;
+        let notice = DropNotice(self.dropped.clone());
+        Box::pin(async move {
+            let _notice = notice;
+            if hold {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
+    }
+    fn cancel_download_task(&self, id: String) -> BackendFuture<()> {
+        self.calls.borrow_mut().push(format!("cancel:{id}"));
+        Box::pin(async { Ok(()) })
+    }
+    fn generate(
+        &self,
+        _: GenerationRequest,
+        _: Callback<GenerationEvent>,
+    ) -> BackendFuture<Option<InferenceMetrics>> {
+        self.calls.borrow_mut().push("generate".into());
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[tokio::test]
+async fn catalog_ui_deploys_once_and_cancellation_only_drops_local_deployment() {
+    let service = CatalogServer::start("downloadable", false, false).await;
+    let backend = Rc::new(DeploymentBackend {
+        hold: true,
+        ..Default::default()
+    });
+    let dom = VirtualDom::new(super::super::super::ChatHome)
+        .with_root_context(BackendHandle(backend.clone()))
+        .with_root_context(service.client.clone());
+    let mut ui = Ui::mount(dom);
+    ui.preview_catalog().await;
+    ui.label("选择并检查硬件兼容性");
+    ui.wait_for(|probe| probe.text.contains("q4")).await;
+    ui.click("chat-variant");
+    ui.wait_for(|_| {
+        backend
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("deploy:"))
+    })
+    .await;
+    assert_eq!(
+        *backend.calls.borrow(),
+        vec!["initialize", "deploy:path.gguf"]
+    );
+    ui.click("chat-flow-button");
+    ui.flush();
+    assert!(backend.dropped.get());
+    assert_eq!(
+        *backend.calls.borrow(),
+        vec!["initialize", "deploy:path.gguf"]
+    );
+}
+
+#[tokio::test]
+async fn catalog_ui_deployment_success_marks_ready() {
+    let service = CatalogServer::start("downloadable", false, false).await;
+    let backend = Rc::new(DeploymentBackend::default());
+    let dom = VirtualDom::new(super::super::super::ChatHome)
+        .with_root_context(BackendHandle(backend.clone()))
+        .with_root_context(service.client.clone());
+    let mut ui = Ui::mount(dom);
+    ui.preview_catalog().await;
+    ui.label("选择并检查硬件兼容性");
+    ui.wait_for(|probe| probe.text.contains("q4")).await;
+    ui.click("chat-variant");
+    ui.wait_for(|probe| probe.text.contains("部署成功，模型已就绪"))
+        .await;
+    assert_eq!(
+        *backend.calls.borrow(),
+        vec!["initialize", "deploy:path.gguf"]
+    );
+}
+
+#[tokio::test]
+async fn restarted_catalog_deployment_keeps_new_task_until_its_own_cancel() {
+    let service = CatalogServer::start("downloadable", false, false).await;
+    let backend = Rc::new(DeploymentBackend {
+        hold: true,
+        ..Default::default()
+    });
+    let dom = VirtualDom::new(super::super::super::ChatHome)
+        .with_root_context(BackendHandle(backend.clone()))
+        .with_root_context(service.client.clone());
+    let mut ui = Ui::mount(dom);
+    ui.preview_catalog().await;
+    ui.label("选择并检查硬件兼容性");
+    ui.wait_for(|probe| probe.text.contains("q4")).await;
+    ui.click("chat-variant");
+    ui.wait_for(|_| {
+        backend
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| call.starts_with("deploy:"))
+            .count()
+            == 1
+    })
+    .await;
+    ui.click("chat-flow-button");
+    assert!(backend.dropped.get());
+    backend.dropped.set(false);
+    // 探针不维护完整 DOM 子树。忽略已卸载弹层的属性，等待新弹层实际装载。
+    ui.probe.attributes.retain(|_, attrs| {
+        attrs.get("class").is_none_or(|class| {
+            !matches!(
+                class.as_str(),
+                "chat-model-option"
+                    | "chat-variant"
+                    | "chat-row-icon-button"
+                    | "chat-row-text-button"
+            )
+        })
+    });
+    ui.probe.text.clear();
+    ui.preview_catalog().await;
+    ui.probe.text.clear();
+    ui.label("选择并检查硬件兼容性");
+    ui.wait_for(|probe| probe.text.contains("q4")).await;
+    ui.click("chat-variant");
+    ui.wait_for(|_| {
+        backend
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| call.starts_with("deploy:"))
+            .count()
+            == 2
+    })
+    .await;
+    ui.flush();
+    assert!(!backend.dropped.get(), "旧任务收尾不得取消新任务");
+    ui.click("chat-flow-button");
+    assert!(backend.dropped.get());
+    assert!(!backend
+        .calls
+        .borrow()
+        .iter()
+        .any(|call| call.starts_with("cancel:")));
+}
+
+#[tokio::test]
+async fn catalog_ui_mismatched_download_credentials_never_deploy() {
+    let service = CatalogServer::start("downloadable", false, false).await;
+    let backend = Rc::new(DeploymentBackend {
+        mismatch: true,
+        ..Default::default()
+    });
+    let dom = VirtualDom::new(super::super::super::ChatHome)
+        .with_root_context(BackendHandle(backend.clone()))
+        .with_root_context(service.client.clone());
+    let mut ui = Ui::mount(dom);
+    ui.preview_catalog().await;
+    ui.label("选择并检查硬件兼容性");
+    ui.wait_for(|probe| probe.text.contains("q4")).await;
+    ui.click("chat-variant");
+    ui.wait_for(|probe| {
+        probe
+            .text
+            .contains("部署凭据与下载模型、版本、摘要或路径不一致")
+    })
+    .await;
+    assert_eq!(*backend.calls.borrow(), vec!["initialize"]);
 }

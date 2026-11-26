@@ -35,6 +35,29 @@ async fn server(responses: Vec<(u16, String)>, delay: Duration, timeout: Duratio
                     break;
                 }
             }
+            let header_end = bytes
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .map(|index| index + 4)
+                .expect("请求头结束");
+            let header = String::from_utf8_lossy(&bytes[..header_end]);
+            let content_length = header
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while bytes.len() < header_end + content_length {
+                let mut buffer = [0; 1024];
+                let count = stream.read(&mut buffer).await.expect("读取请求体");
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            }
             seen.lock()
                 .expect("请求锁")
                 .push(String::from_utf8(bytes).expect("请求文本"));
@@ -65,26 +88,70 @@ async fn json_server(values: Vec<impl serde::Serialize>) -> Server {
 }
 fn version() -> CatalogVersion {
     CatalogVersion {
+        verified_variants: Vec::new(),
         name: "Qwen3-8B".into(),
         model: "Qwen/Qwen3-8B".into(),
         source: "modelscope".into(),
         revision: "master".into(),
         resource_url: "https://modelscope.cn/models/Qwen/Qwen3-8B/files?Revision=master".into(),
+        variants: Vec::new(),
     }
 }
 #[allow(
     clippy::disallowed_types,
     reason = "测试需要构造模型选择协议及非法响应"
 )]
+fn hardware() -> serde_json::Value {
+    json!({"vram_min":"4G","ram_min":"8G","disk_min":"4G",
+        "vram_recommended":"8G","ram_recommended":"16G","disk_recommended":"8G"})
+}
+
+#[allow(clippy::disallowed_types, reason = "测试需要构造完整目录条目")]
 fn item(preset: bool, source: &str) -> serde_json::Value {
-    json!({"id":"qwen3-8b","name":"Qwen3-8B","preset":preset,"model":"Qwen/Qwen3-8B","source":source,
-        "revision":if source == "modelscope" { "master" } else { "main" }})
+    let mut value = json!({"id":"qwen3-8b","name":"Qwen3-8B","preset":preset,"model":"Qwen/Qwen3-8B","source":source,
+        "revision":if source == "modelscope" { "master" } else { "main" }});
+    if preset {
+        value["identity_status"] = json!("verified");
+        value["hardware"] = hardware();
+    }
+    value
+}
+
+#[allow(clippy::disallowed_types, reason = "测试需要构造完整预置目录协议")]
+fn preset_catalog() -> Vec<serde_json::Value> {
+    (0..388)
+        .map(|index| {
+            let mut value = item(true, "modelscope");
+            if index > 0 {
+                value["id"] = json!(format!("qwen3-8b-row-{index}"));
+            }
+            value
+        })
+        .collect()
 }
 
 #[allow(clippy::disallowed_types, reason = "测试需要构造完整状态协议")]
 fn status(source: &str, status: &str) -> serde_json::Value {
-    json!({"status":status,"model":"Qwen/Qwen3-8B","source":source,
-        "revision":if source == "modelscope" {"master"} else {"main"}, "resource_url":"https://example.com/models/Qwen/Qwen3-8B"})
+    let revision = if source == "modelscope" {
+        "master"
+    } else {
+        "main"
+    };
+    let host = match source {
+        "modelscope" => "modelscope.cn/models/Qwen/Qwen3-8B",
+        "hf-mirror" => "hf-mirror.com/Qwen/Qwen3-8B",
+        _ => "huggingface.co/Qwen/Qwen3-8B",
+    };
+    json!({"status":status,"model":"Qwen/Qwen3-8B","source":source,"revision":revision,
+        "resource_url":"https://modelscope.cn/models/Qwen/Qwen3-8B/files?Revision=master",
+        "downloadable":true,"unavailable_reason":null,
+        "identity_status":if source == "modelscope" {Some("verified")} else {None},
+        "artifact_status":"not_downloaded","downloaded":false,"local_path":null,"actual_sha256":null,
+        "variants":[{"id":"qwen3-8b-q4","quantization":"Q4_K_M","runtime":"llama.cpp",
+            "artifact_source":format!("https://{host}/resolve/{revision}/qwen3-8b-q4.gguf"),
+            "expected_sha256":format!("sha256:{}", "a".repeat(64)),"file_size_bytes":1024,
+            "ram_bytes":2048,"vram_bytes":1,"disk_bytes":1024,
+            "artifact_status":"not_downloaded","downloaded":false,"local_path":null,"actual_sha256":null}]})
 }
 
 async fn collect(
@@ -96,6 +163,10 @@ async fn collect(
     Ok(pages)
 }
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "测试需检查模型解析请求体中的协议字段"
+)]
 #[tokio::test]
 async fn selected_catalog_model_resolution_parses_the_node_contract() {
     let checksum = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -120,7 +191,7 @@ async fn selected_catalog_model_resolution_parses_the_node_contract() {
                 "min_vram_bytes":0u64,
                 "disk_size_bytes":1929903008u64,
                 "runtime":"llama.cpp",
-                "artifact_uri":"https://example.invalid/qwen.gguf",
+                "artifact_uri":"https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/qwen3.gguf",
                 "checksum":checksum
             }]
         }
@@ -151,6 +222,100 @@ async fn selected_catalog_model_resolution_parses_the_node_contract() {
     assert!(calls[0].contains("Qwen/Qwen3-8B"));
     assert!(calls[0].contains("modelscope"));
     assert!(calls[0].contains("master"));
+    let body = calls[0].split_once("\r\n\r\n").expect("请求体").1;
+    let payload: serde_json::Value = serde_json::from_str(body).expect("解析请求体");
+    assert_eq!(payload["preset_id"], "qwen3-8b");
+    assert_eq!(payload["model"], "Qwen/Qwen3-8B");
+    assert_eq!(payload["source"], "modelscope");
+    assert_eq!(payload["revision"], "master");
+}
+
+#[tokio::test]
+async fn model_resolution_rejects_forged_urls_and_invalid_hardware_or_digest() {
+    let candidate = json!({
+        "model_name":"Qwen/Qwen3-8B", "variant_id":"qwen3.gguf",
+        "quantization":"Q4_K_M", "min_ram_bytes":4u64, "min_vram_bytes":0u64,
+        "disk_size_bytes":4u64, "runtime":"llama.cpp",
+        "artifact_uri":"https://modelscope.cn/models/Qwen/Qwen3-8B/resolve/master/qwen3.gguf",
+        "checksum":format!("sha256:{}", "a".repeat(64))
+    });
+    let mut bad_candidates = Vec::new();
+    let mut fake_url = candidate.clone();
+    fake_url["artifact_uri"] =
+        json!("https://evil.example/Qwen/Qwen3-8B/resolve/master/qwen3.gguf");
+    bad_candidates.push(fake_url);
+    let mut bad_digest = candidate.clone();
+    bad_digest["checksum"] = json!("bad");
+    bad_candidates.push(bad_digest);
+    let mut bad_ram = candidate.clone();
+    bad_ram["min_ram_bytes"] = json!(0);
+    bad_candidates.push(bad_ram);
+    let mut bad_disk = candidate;
+    bad_disk["disk_size_bytes"] = json!(0);
+    bad_candidates.push(bad_disk);
+
+    for candidate in bad_candidates {
+        let service = json_server(vec![json!({
+            "success":true,
+            "data":{
+                "status":"resolved", "model":"Qwen/Qwen3-8B",
+                "hardware":{"platform":"windows","arch":"x86_64","cpu":"测试 CPU",
+                    "memory_bytes":8u64,"disk_available_bytes":8u64,"accelerators":[]},
+                "candidates":[candidate]
+            }
+        })])
+        .await;
+        let error = service
+            .client
+            .resolve_model(&CatalogSelection {
+                name: "Qwen3-8B".into(),
+                preset: Some("qwen3-8b".into()),
+                version: version(),
+            })
+            .await
+            .expect_err("非法候选必须拒绝");
+        assert_eq!(error.kind, ErrorKind::InvalidResult);
+    }
+}
+
+#[allow(
+    clippy::disallowed_types,
+    reason = "测试需检查旧版搜索请求不携带预置标识"
+)]
+#[tokio::test]
+async fn model_resolution_keeps_search_request_compatible_without_preset_id() {
+    let service = json_server(vec![json!({
+        "success": true,
+        "data": {
+            "status": "unsupported",
+            "model": "Qwen/Qwen3-8B",
+            "hardware": {
+                "platform": "windows", "arch": "x86_64", "cpu": "测试 CPU",
+                "memory_bytes": 8589934592u64, "disk_available_bytes": 17179869184u64,
+                "accelerators": []
+            },
+            "candidates": [],
+            "reason": {"code":"no_compatible_variant","message":"无兼容变体"}
+        }
+    })])
+    .await;
+    let selection = CatalogSelection {
+        name: "Qwen3-8B".into(),
+        preset: None,
+        version: version(),
+    };
+
+    let resolution = service
+        .client
+        .resolve_model(&selection)
+        .await
+        .expect("旧版搜索解析");
+    assert!(resolution.variants.is_empty());
+    let calls = service.requests.lock().expect("请求记录");
+    let body = calls[0].split_once("\r\n\r\n").expect("请求体").1;
+    let payload: serde_json::Value = serde_json::from_str(body).expect("解析请求体");
+    assert!(payload.get("preset_id").is_none());
+    assert_eq!(payload["model"], "Qwen/Qwen3-8B");
 }
 
 #[tokio::test]
@@ -196,15 +361,109 @@ async fn model_resolution_rejects_mismatched_candidate_model() {
 
 #[tokio::test]
 async fn presets_load_from_main_service_with_flat_resources() {
-    let service = json_server(vec![json!([item(true, "modelscope")])]).await;
+    let service = json_server(vec![json!(preset_catalog())]).await;
     let pages = collect(&service.client, " ").await.expect("预置列表");
     assert_eq!(pages.len(), 1);
     assert!(pages[0].done && pages[0].items[0].preset);
+    assert_eq!(pages[0].items.len(), 388);
+    assert_eq!(pages[0].items[0].id, "qwen3-8b");
     assert_eq!(pages[0].items[0].model, "Qwen/Qwen3-8B");
     let calls = service.requests.lock().expect("请求记录");
     assert_eq!(calls.len(), 1);
     assert!(calls[0].starts_with("GET /api/models/presets"));
     assert!(!calls[0].contains("page="));
+}
+
+#[tokio::test]
+async fn imported_presets_preserve_duplicate_rows_hardware_and_links() {
+    let mut first = item(true, "modelscope");
+    first["resource_url"] = json!("https://www.modelscope.cn/models/Qwen/Qwen3-8B");
+    first["hardware"] = json!({
+        "vram_min":"6.00G", "ram_min":"12.00G", "disk_min":"6.00G",
+        "vram_recommended":"8.00G", "ram_recommended":"16.00G", "disk_recommended":"8.00G"
+    });
+    let mut duplicate = first.clone();
+    duplicate["id"] = json!("qwen3-8b-row-1");
+    let mut presets = preset_catalog();
+    presets[0] = first;
+    presets[1] = duplicate;
+    let service = json_server(vec![json!(presets)]).await;
+    let pages = collect(&service.client, "").await.expect("导入列表");
+    let items = &pages[0].items;
+    assert_eq!(items.len(), 388);
+    assert_ne!(items[0].id, items[1].id);
+    assert_eq!(items[0].name, items[1].name);
+    assert_eq!(
+        items[0].resource_url.as_deref(),
+        Some("https://www.modelscope.cn/models/Qwen/Qwen3-8B")
+    );
+    assert_eq!(
+        items[0].hardware,
+        Some(HardwareRequirements {
+            vram_min: "6.00G".into(),
+            ram_min: "12.00G".into(),
+            disk_min: "6.00G".into(),
+            vram_recommended: "8.00G".into(),
+            ram_recommended: "16.00G".into(),
+            disk_recommended: "8.00G".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn preset_catalog_requires_exactly_388_unique_ids() {
+    for count in [387, 389] {
+        let mut presets = preset_catalog();
+        presets.truncate(count.min(presets.len()));
+        if count == 389 {
+            let mut extra = item(true, "modelscope");
+            extra["id"] = json!("qwen3-8b-extra");
+            presets.push(extra);
+        }
+        let service = json_server(vec![json!(presets)]).await;
+        assert_eq!(
+            collect(&service.client, "").await.unwrap_err().kind,
+            ErrorKind::InvalidResult
+        );
+    }
+
+    let mut presets = preset_catalog();
+    presets[1]["id"] = json!("qwen3-8b");
+    let service = json_server(vec![json!(presets)]).await;
+    assert_eq!(
+        collect(&service.client, "").await.unwrap_err().kind,
+        ErrorKind::InvalidResult
+    );
+}
+
+#[test]
+fn catalog_rejects_unsafe_links_and_duplicate_suffixes_in_search_results() {
+    for link in [
+        "javascript:alert(1)",
+        "file:///tmp/model",
+        "https://user:password@example.com",
+    ] {
+        let mut value = item(true, "modelscope");
+        value["resource_url"] = json!(link);
+        let model: CatalogModel = serde_json::from_value(value).expect("测试条目");
+        assert!(model.validate().is_err());
+    }
+    let mut invalid_hardware = item(true, "modelscope");
+    invalid_hardware["hardware"]["vram_min"] = json!("1e3G");
+    let invalid_hardware: CatalogModel =
+        serde_json::from_value(invalid_hardware).expect("硬件字段类型正确");
+    assert!(invalid_hardware.validate().is_err());
+
+    for (preset, id) in [
+        (false, "qwen3-8b-row-24"),
+        (true, "qwen3-8b-row-"),
+        (true, "qwen3-8b-row-../1"),
+    ] {
+        let mut value = item(preset, "modelscope");
+        value["id"] = json!(id);
+        let model: CatalogModel = serde_json::from_value(value).expect("测试条目");
+        assert!(model.validate().is_err());
+    }
 }
 
 #[tokio::test]
@@ -246,9 +505,11 @@ async fn one_status_request_resolves_each_selection_and_accepts_four_states() {
             ("developing", VersionStatus::Developing),
         ] {
             let service = json_server(vec![status(source, name)]).await;
-            let (resource, state) = service.client.inspect(&model).await.expect("状态");
-            assert_eq!(state, expected);
-            assert_eq!(resource.expect("资源").source, source);
+            let inspection = service.client.inspect(&model).await.expect("状态");
+            assert_eq!(inspection.remote_status, expected);
+            let resource = inspection.version;
+            assert_eq!(resource.source, source);
+            assert_eq!(resource.variants[0].id, "qwen3-8b-q4");
             let calls = service.requests.lock().expect("请求");
             assert_eq!(calls.len(), 1);
             assert!(calls[0].contains("/api/models/status?"));
@@ -264,6 +525,90 @@ async fn one_status_request_resolves_each_selection_and_accepts_four_states() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn status_rejects_forged_artifact_metadata_and_incomplete_receipts() {
+    let model: CatalogModel = serde_json::from_value(item(true, "modelscope")).expect("预置模型");
+    let mut malformed = Vec::new();
+
+    let mut fake_url = status("modelscope", "downloadable");
+    fake_url["variants"][0]["artifact_source"] =
+        json!("https://evil.example/Qwen/Qwen3-8B/resolve/master/model.gguf");
+    malformed.push(fake_url);
+
+    let mut page_url = status("modelscope", "downloadable");
+    page_url["variants"][0]["artifact_source"] =
+        json!("https://modelscope.cn/models/Qwen/Qwen3-8B/files?Revision=master");
+    malformed.push(page_url);
+
+    let mut bad_digest = status("modelscope", "downloadable");
+    bad_digest["variants"][0]["expected_sha256"] = json!("not-a-sha256");
+    malformed.push(bad_digest);
+
+    let mut zero_size = status("modelscope", "downloadable");
+    zero_size["variants"][0]["file_size_bytes"] = json!(0);
+    malformed.push(zero_size);
+
+    let mut bad_hardware = status("modelscope", "downloadable");
+    bad_hardware["variants"][0]["ram_bytes"] = json!(0);
+    malformed.push(bad_hardware);
+
+    let mut incomplete_variant_receipt = status("modelscope", "downloadable");
+    incomplete_variant_receipt["variants"][0]["artifact_status"] = json!("downloaded");
+    incomplete_variant_receipt["variants"][0]["downloaded"] = json!(true);
+    incomplete_variant_receipt["variants"][0]["local_path"] = json!("/node/model.gguf");
+    malformed.push(incomplete_variant_receipt);
+
+    let mut incomplete_top_receipt = status("modelscope", "downloadable");
+    incomplete_top_receipt["artifact_status"] = json!("downloaded");
+    incomplete_top_receipt["downloaded"] = json!(true);
+    incomplete_top_receipt["local_path"] = json!("/node/model.gguf");
+    malformed.push(incomplete_top_receipt);
+
+    let mut missing_unavailable_reason = status("modelscope", "downloadable");
+    missing_unavailable_reason["downloadable"] = json!(false);
+    malformed.push(missing_unavailable_reason);
+
+    for response in malformed {
+        let service = json_server(vec![response]).await;
+        let error = service
+            .client
+            .inspect(&model)
+            .await
+            .expect_err("非法状态必须拒绝");
+        assert_eq!(error.kind, ErrorKind::InvalidResult);
+    }
+}
+
+#[tokio::test]
+async fn pending_catalog_identity_is_visible_but_not_downloadable() {
+    let mut preset = item(true, "modelscope");
+    preset["identity_status"] = json!("pending_validation");
+    let model: CatalogModel = serde_json::from_value(preset).expect("待校验预置");
+    let mut response = status("modelscope", "developing");
+    response["identity_status"] = json!("pending_validation");
+    response["downloadable"] = json!(false);
+    response["unavailable_reason"] = json!({
+        "code":"preset_identity_pending",
+        "message":"该预置模型身份待校验，暂不可下载"
+    });
+    response["variants"] = json!([]);
+    let service = json_server(vec![response]).await;
+    let inspection = service.client.inspect(&model).await.expect("只展示状态");
+    assert!(!inspection.downloadable);
+    assert_eq!(
+        inspection.identity_status,
+        Some(IdentityStatus::PendingValidation)
+    );
+    assert_eq!(
+        inspection
+            .unavailable_reason
+            .as_ref()
+            .map(|reason| reason.code.as_str()),
+        Some("preset_identity_pending")
+    );
+    assert!(inspection.version.variants.is_empty());
 }
 
 #[tokio::test]
@@ -457,6 +802,16 @@ fn preset_accepts_stable_id_for_gguf_repository_but_search_result_does_not() {
         model: "Qwen/Qwen3-8B-GGUF".into(),
         source: "modelscope".into(),
         revision: "master".into(),
+        resource_url: Some("https://www.modelscope.cn/models/Qwen/Qwen3-8B-GGUF".into()),
+        hardware: Some(HardwareRequirements {
+            vram_min: "4G".into(),
+            ram_min: "8G".into(),
+            disk_min: "4G".into(),
+            vram_recommended: "8G".into(),
+            ram_recommended: "16G".into(),
+            disk_recommended: "8G".into(),
+        }),
+        identity_status: Some(IdentityStatus::Verified),
     };
     assert!(preset.validate().is_ok());
 
@@ -683,6 +1038,7 @@ fn download_request(checksum: &str) -> InitializationRequest {
         ram_bytes: 1,
         vram_bytes: 0,
         disk_bytes: 1,
+        file_size_bytes: None,
     };
     let selection = catalog_selection();
     InitializationRequest {
@@ -701,6 +1057,47 @@ fn download_request(checksum: &str) -> InitializationRequest {
 
 const DOWNLOAD_DIGEST: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[tokio::test]
+async fn catalog_deployment_poll_uses_the_registered_task_route() {
+    let task_id = "c9471f6d-649f-464d-8a3d-1ab02be7bcf9";
+    let service = json_server(vec![
+        json!({
+            "success": true,
+            "data": {
+                "task_id": task_id,
+                "status": "queued",
+                "ready_to_chat": false,
+                "deployment": null
+            }
+        }),
+        json!({
+            "success": true,
+            "data": {
+                "task_id": task_id,
+                "status": "succeeded",
+                "ready_to_chat": true,
+                "deployment": {"model_id": "Qwen2.5-0"}
+            }
+        }),
+    ])
+    .await;
+
+    let request = download_request(DOWNLOAD_DIGEST);
+    let model_id = service
+        .client
+        .deploy_catalog_model(&request)
+        .await
+        .expect("部署任务应轮询到可对话状态");
+
+    assert_eq!(model_id, "Qwen2.5-0");
+    let calls = service.requests.lock().expect("请求记录");
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].starts_with("POST /api/node/models/deployments HTTP/1.1"));
+    assert!(calls[1].starts_with(
+        "GET /api/node/models/deployments/c9471f6d-649f-464d-8a3d-1ab02be7bcf9 HTTP/1.1"
+    ));
+}
 
 #[tokio::test]
 #[expect(
@@ -785,14 +1182,47 @@ async fn download_model_polls_progress_and_verification_until_succeeded() {
         ),
     ])
     .await;
-    let request = download_request(DOWNLOAD_DIGEST);
+    let selected = download_request(DOWNLOAD_DIGEST);
+    let mut chat = super::super::state::ChatState::default();
+    let run_id = chat
+        .accept_catalog(
+            selected.model.catalog_selection.expect("目录选择"),
+            VersionStatus::Downloadable,
+            vec![selected.variant],
+        )
+        .expect("启动目录模型准备");
+    chat.finish_hardware(
+        run_id,
+        Ok(Hardware {
+            ram_bytes: Some(100),
+            disk_bytes: Some(100),
+            gpus: Some(Vec::new()),
+            ..Hardware::default()
+        }),
+    );
+    assert!(chat.choose_variant(run_id, "Q4_K_M.gguf"));
+    let request = chat.initialization_request(run_id).expect("下载快照");
     let mut events = Vec::new();
     let prepared = service
         .client
-        .download_model(&request, |event| events.push(event))
+        .download_model(&request, |event| {
+            // 两次轮询跨过下载完成点时，真实状态机也必须能接收校验边界。
+            chat.preparation_event(run_id, event.clone());
+            events.push(event);
+        })
         .await
         .expect("轮询下载成功");
 
+    let preparation = chat.preparation().expect("准备卡片");
+    assert_eq!(preparation.stage, PreparationStage::ArtifactReady);
+    assert!(preparation.error.is_none());
+    assert_eq!(preparation.completed_bytes, 10);
+    assert_eq!(preparation.total_bytes, Some(10));
+    assert_eq!(
+        preparation.local_path.as_deref(),
+        Some("/node/models/model.gguf")
+    );
+    assert_eq!(preparation.actual_digest.as_deref(), Some(DOWNLOAD_DIGEST));
     assert_eq!(prepared.actual_sha256, DOWNLOAD_DIGEST);
     assert_eq!(
         events,
@@ -991,4 +1421,348 @@ fn task_ids_accept_only_decimal_i64_values() {
     assert!(!valid_task_id("-1"));
     assert!(!valid_task_id("1x"));
     assert!(!valid_task_id("9223372036854775808"));
+}
+
+#[allow(clippy::disallowed_types, reason = "测试必须构造部署响应及其非法变体")]
+fn deploy_snapshot(status: &str) -> serde_json::Value {
+    json!({"model_id":"model", "status":status, "stage":null, "state":null,
+        "endpoint":null, "pid":null, "last_heartbeat_unix_ms":null,
+        "error":null, "events":[]})
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "部署协议替身需要构造动态 JSON，不参与生产业务逻辑"
+)]
+fn route_snapshot(route_status: &str) -> serde_json::Value {
+    let mut snapshot = deploy_snapshot("ready");
+    snapshot["route_status"] = json!(route_status);
+    // 测试不绑定任何固定持久化 ID；真实 ID 由 Router 创建并返回。
+    snapshot["route_attachment_id"] = json!(null);
+    snapshot["capacity"] = json!({
+        "total_slots": 1,
+        "free_slots": if route_status == "saturated" { 0 } else { 1 },
+        "observed_at_unix_ms": 1790000000000u64
+    });
+    snapshot["last_heartbeat_unix_ms"] = json!(1790000000000u64);
+    snapshot
+}
+
+#[tokio::test]
+async fn deployment_route_status_validates_model_and_stable_status() {
+    for status in [
+        "unroutable",
+        "routable",
+        "saturated",
+        "quarantined",
+        "lost",
+        "detaching",
+        "detached",
+        "failed",
+    ] {
+        let service = json_server(vec![route_snapshot(status)]).await;
+        assert_eq!(
+            service
+                .client
+                .deployment_route_status("model")
+                .await
+                .expect("合法 Router 状态"),
+            status
+        );
+    }
+
+    let mut mismatch = route_snapshot("routable");
+    mismatch["model_id"] = json!("other");
+    let service = json_server(vec![mismatch]).await;
+    let error = service
+        .client
+        .deployment_route_status("model")
+        .await
+        .expect_err("模型 ID 不一致");
+    assert_eq!(error.kind, ErrorKind::InvalidResult);
+
+    let service = json_server(vec![deploy_snapshot("ready")]).await;
+    let error = service
+        .client
+        .deployment_route_status("model")
+        .await
+        .expect_err("缺少 Router 状态");
+    assert_eq!(error.kind, ErrorKind::InvalidResult);
+
+    let mut unknown = route_snapshot("routable");
+    unknown["route_status"] = json!("unknown");
+    let service = json_server(vec![unknown]).await;
+    let error = service
+        .client
+        .deployment_route_status("model")
+        .await
+        .expect_err("未知 Router 状态");
+    assert_eq!(error.kind, ErrorKind::InvalidResult);
+}
+
+#[tokio::test]
+async fn deployment_route_status_polls_unroutable_until_capacity_is_ready() {
+    let service = json_server(vec![
+        deploy_snapshot("ready"),
+        route_snapshot("unroutable"),
+        route_snapshot("unroutable"),
+        route_snapshot("routable"),
+    ])
+    .await;
+    service
+        .client
+        .deploy_model("model.gguf")
+        .await
+        .expect("部署就绪");
+    let status = service
+        .client
+        .poll_deployment_route_status("model")
+        .await
+        .expect("Router 状态查询");
+    assert_eq!(status, "routable");
+    assert_eq!(service.requests.lock().expect("请求记录").len(), 4);
+}
+
+#[tokio::test]
+async fn deployment_route_status_query_failure_does_not_cancel_deployment() {
+    let service = server(
+        vec![
+            (200, deploy_snapshot("ready").to_string()),
+            (503, "service unavailable".into()),
+        ],
+        Duration::ZERO,
+        Duration::from_secs(2),
+    )
+    .await;
+    service
+        .client
+        .deploy_model("model.gguf")
+        .await
+        .expect("部署应保持成功");
+    let error = service
+        .client
+        .poll_deployment_route_status("model")
+        .await
+        .expect_err("状态查询失败");
+    assert_eq!(error.kind, ErrorKind::ExecutionFailed);
+}
+
+#[tokio::test]
+async fn deploy_http_posts_original_path_and_maps_terminal_states() {
+    let path = " C:\\模型\\model.gguf ";
+    let service = json_server(vec![deploy_snapshot("ready")]).await;
+    service.client.deploy_model(path).await.expect("部署就绪");
+    {
+        let calls = service.requests.lock().expect("请求记录");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].starts_with("POST /console/api/node/deployments "));
+        let body = calls[0].split_once("\r\n\r\n").expect("请求体").1;
+        let body: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(body).expect("请求 JSON");
+        assert_eq!(body["model_path"], path);
+    }
+
+    for (status, stage) in [
+        ("failed", PreparationStage::Deploying),
+        ("unhealthy", PreparationStage::HealthChecking),
+    ] {
+        let mut snapshot = deploy_snapshot(status);
+        snapshot["error"] = json!("远端故障");
+        let service = json_server(vec![snapshot]).await;
+        let error = service
+            .client
+            .deploy_model(path)
+            .await
+            .expect_err("部署失败");
+        assert_eq!(error.kind, ErrorKind::ExecutionFailed);
+        assert_eq!(error.operation, Operation::Initialize(stage));
+        assert_eq!(error.reason, "远端故障");
+    }
+}
+
+#[tokio::test]
+async fn deploy_http_rejects_invalid_snapshots_and_http_errors() {
+    let mut invalid = vec!["not json".to_string()];
+    for field in [
+        "model_id",
+        "status",
+        "stage",
+        "state",
+        "endpoint",
+        "pid",
+        "last_heartbeat_unix_ms",
+        "error",
+        "events",
+    ] {
+        let mut snapshot = deploy_snapshot("ready");
+        snapshot.as_object_mut().expect("对象").remove(field);
+        invalid.push(snapshot.to_string());
+    }
+    let mut blank = deploy_snapshot("ready");
+    blank["model_id"] = json!("");
+    invalid.push(blank.to_string());
+    let mut bad_events = deploy_snapshot("ready");
+    bad_events["events"] = json!({});
+    invalid.push(bad_events.to_string());
+    for status in ["queued", "deploying", "unknown", ""] {
+        invalid.push(deploy_snapshot(status).to_string());
+    }
+    for body in invalid {
+        let service = server(vec![(200, body)], Duration::ZERO, Duration::from_secs(2)).await;
+        let error = service
+            .client
+            .deploy_model("model")
+            .await
+            .expect_err("非法快照");
+        assert_eq!(error.kind, ErrorKind::InvalidResult);
+        assert_eq!(
+            error.operation,
+            Operation::Initialize(PreparationStage::Deploying)
+        );
+    }
+    for (status, body) in [
+        (400, "{\"error\":\"路径无效\"}"),
+        (503, "bad"),
+        (418, "bad"),
+        (302, "bad"),
+    ] {
+        let service = server(
+            vec![(status, body.into())],
+            Duration::ZERO,
+            Duration::from_secs(2),
+        )
+        .await;
+        let error = service
+            .client
+            .deploy_model("model")
+            .await
+            .expect_err("HTTP 错误");
+        assert_eq!(error.kind, ErrorKind::ExecutionFailed);
+        assert_eq!(
+            error.operation,
+            Operation::Initialize(PreparationStage::Deploying)
+        );
+        assert!(!error.reason.is_empty());
+        if status == 400 {
+            assert_eq!(error.reason, "路径无效");
+        }
+        assert_eq!(service.requests.lock().expect("请求记录").len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn deploy_http_rejects_bad_paths_and_times_out() {
+    let service = server(
+        vec![(200, deploy_snapshot("ready").to_string())],
+        Duration::from_millis(300),
+        Duration::from_millis(30),
+    )
+    .await;
+    for path in ["", "a\0b"] {
+        let error = service
+            .client
+            .deploy_model(path)
+            .await
+            .expect_err("非法路径");
+        assert_eq!(error.kind, ErrorKind::InvalidParameter);
+    }
+    assert!(service.requests.lock().expect("请求记录").is_empty());
+    let error = service
+        .client
+        .deploy_model("model")
+        .await
+        .expect_err("超时");
+    assert_eq!(error.kind, ErrorKind::Timeout);
+    assert_eq!(
+        error.operation,
+        Operation::Initialize(PreparationStage::Deploying)
+    );
+}
+
+#[tokio::test]
+async fn deploy_http_does_not_follow_redirects() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("监听");
+    let base = format!("http://{}", listener.local_addr().expect("地址"));
+    let location = format!("{base}/redirected");
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("部署请求");
+        let mut bytes = [0; 2048];
+        let count = stream.read(&mut bytes).await.expect("读取请求");
+        assert!(String::from_utf8_lossy(&bytes[..count])
+            .starts_with("POST /console/api/node/deployments "));
+        let response = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("返回重定向");
+        tokio::time::timeout(Duration::from_millis(150), listener.accept())
+            .await
+            .is_err()
+    });
+    let client = CatalogClient::new(&base, Duration::from_secs(1)).expect("客户端");
+    let error = client
+        .deploy_model("model")
+        .await
+        .expect_err("不接受重定向");
+    assert_eq!(error.kind, ErrorKind::ExecutionFailed);
+    assert!(task.await.expect("测试任务"));
+}
+
+#[tokio::test]
+async fn deploy_http_connection_failure_is_not_connected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("监听");
+    let base = format!("http://{}", listener.local_addr().expect("地址"));
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("连接");
+        drop(stream);
+    });
+    let client = CatalogClient::new(&base, Duration::from_secs(2)).expect("客户端");
+    let error = client
+        .deploy_model("model.gguf")
+        .await
+        .expect_err("连接失败");
+    assert_eq!(error.kind, ErrorKind::NotConnected);
+    assert_eq!(
+        error.operation,
+        Operation::Initialize(PreparationStage::Deploying)
+    );
+    server.await.expect("服务端任务");
+}
+
+#[tokio::test]
+async fn verified_catalog_variant_is_used_without_posting_a_download() {
+    let mut request = download_request(DOWNLOAD_DIGEST);
+    let v = &request.variant;
+    let response = json!({"status":"downloadable", "model":"Qwen/Qwen3-8B", "source":"modelscope", "revision":"master", "resource_url":version().resource_url,
+        "downloadable":false,"unavailable_reason":{"code":"repository_unavailable","message":"仓库暂不可用"},"identity_status":"verified",
+        "artifact_status":"downloaded", "downloaded":true, "local_path":"/node/m.gguf", "actual_sha256":DOWNLOAD_DIGEST,
+        "variants":[{"id":v.id,"quantization":v.quantization,"runtime":v.runtime,"artifact_source":v.artifact_source,"expected_sha256":DOWNLOAD_DIGEST,"file_size_bytes":1,"ram_bytes":1,"vram_bytes":0,"disk_bytes":1,"downloaded":true,"artifact_status":"downloaded","local_path":"/node/m.gguf","actual_sha256":DOWNLOAD_DIGEST}]});
+    let service = json_server(vec![response]).await;
+    let model: CatalogModel = serde_json::from_value(item(true, "modelscope")).expect("目录项");
+    let inspection = service.client.inspect(&model).await.expect("已下载工件");
+    let mut other = v.clone();
+    other.artifact_source.push_str(".other");
+    assert!(inspection.version.verified_path(&other).is_none());
+    request
+        .model
+        .catalog_selection
+        .as_mut()
+        .expect("目录选择")
+        .version = inspection.version;
+    let mut events = Vec::new();
+    let prepared = service
+        .client
+        .download_model(&request, |e| events.push(e))
+        .await
+        .expect("复用工件");
+    assert!(prepared.is_valid());
+    assert_eq!(prepared.local_path, "/node/m.gguf");
+    assert!(matches!(
+        events.as_slice(),
+        [
+            PreparationEvent::Downloaded,
+            PreparationEvent::Verified { .. }
+        ]
+    ));
+    assert_eq!(service.requests.lock().expect("请求记录").len(), 1);
 }
