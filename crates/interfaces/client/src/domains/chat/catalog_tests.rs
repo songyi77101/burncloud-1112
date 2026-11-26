@@ -1059,6 +1059,47 @@ const DOWNLOAD_DIGEST: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[tokio::test]
+async fn catalog_deployment_poll_uses_the_registered_task_route() {
+    let task_id = "c9471f6d-649f-464d-8a3d-1ab02be7bcf9";
+    let service = json_server(vec![
+        json!({
+            "success": true,
+            "data": {
+                "task_id": task_id,
+                "status": "queued",
+                "ready_to_chat": false,
+                "deployment": null
+            }
+        }),
+        json!({
+            "success": true,
+            "data": {
+                "task_id": task_id,
+                "status": "succeeded",
+                "ready_to_chat": true,
+                "deployment": {"model_id": "Qwen2.5-0"}
+            }
+        }),
+    ])
+    .await;
+
+    let request = download_request(DOWNLOAD_DIGEST);
+    let model_id = service
+        .client
+        .deploy_catalog_model(&request)
+        .await
+        .expect("部署任务应轮询到可对话状态");
+
+    assert_eq!(model_id, "Qwen2.5-0");
+    let calls = service.requests.lock().expect("请求记录");
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].starts_with("POST /api/node/models/deployments HTTP/1.1"));
+    assert!(calls[1].starts_with(
+        "GET /api/node/models/deployments/c9471f6d-649f-464d-8a3d-1ab02be7bcf9 HTTP/1.1"
+    ));
+}
+
+#[tokio::test]
 #[expect(
     clippy::disallowed_types,
     reason = "下载接口测试需要检查实际提交的 JSON 字段"

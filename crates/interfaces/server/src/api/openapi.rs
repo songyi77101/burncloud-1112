@@ -629,6 +629,69 @@ fn generate_paths() -> serde_json::Value {
                 }
             }
         },
+        "/api/node/models/deployments": {
+            "post": {
+                "tags": ["Node"],
+                "summary": "Create an asynchronous local model deployment",
+                "description": "Register or reuse a local model deployment task. The server downloads and verifies the selected GGUF, starts the managed llama.cpp runtime, attaches the real route, and exposes ready_to_chat only after the route is routable.",
+                "operationId": "createNodeModelDeployment",
+                "security": [],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/AutoDeploymentRequest"}
+                        }
+                    }
+                },
+                "responses": {
+                    "202": {
+                        "description": "Deployment task accepted or an in-flight task reused",
+                        "headers": {
+                            "Location": {"description": "Relative URL of the task", "schema": {"type": "string"}},
+                            "Cache-Control": {"description": "The response is not cacheable.", "schema": {"type": "string", "example": "no-store"}}
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/AutoDeploymentSubmitResponse"}
+                            }
+                        }
+                    },
+                    "400": {"description": "The deployment request is invalid", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}},
+                    "413": {"description": "The request body is too large", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}},
+                    "500": {"description": "The deployment task could not be persisted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}}
+                }
+            }
+        },
+        "/api/node/models/deployments/{task_id}": {
+            "get": {
+                "tags": ["Node"],
+                "summary": "Get a local model deployment task",
+                "operationId": "getNodeModelDeployment",
+                "security": [],
+                "parameters": [{"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {
+                    "200": {"description": "Deployment task snapshot", "headers": {"Cache-Control": {"description": "The response is not cacheable.", "schema": {"type": "string", "example": "no-store"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentQueryResponse"}}}},
+                    "400": {"description": "The task ID is invalid", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}},
+                    "404": {"description": "The task does not exist for this local Node", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}},
+                    "500": {"description": "The deployment task could not be read", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}}
+                }
+            },
+            "delete": {
+                "tags": ["Node"],
+                "summary": "Request cancellation of a local model deployment task",
+                "operationId": "cancelNodeModelDeployment",
+                "security": [],
+                "parameters": [{"name": "task_id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}],
+                "responses": {
+                    "202": {"description": "Cancellation accepted; cleanup may still be running", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentQueryResponse"}}}},
+                    "200": {"description": "The task was already cancelled", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentQueryResponse"}}}},
+                    "400": {"description": "The task ID is invalid", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}},
+                    "404": {"description": "The task does not exist for this local Node", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}},
+                    "409": {"description": "The task is already in a non-cancellable terminal state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AutoDeploymentErrorResponse"}}}}
+                }
+            }
+        },
         "/api/node/models/resolve": {
             "post": {
                 "tags": ["Node"],
@@ -1096,6 +1159,103 @@ fn generate_schemas() -> serde_json::Value {
                         "message": {"type": "string"}
                     }
                 }
+            }
+        },
+        "AutoDeploymentRequest": {
+            "type": "object",
+            "required": ["model", "source", "revision", "variant_id", "checksum"],
+            "additionalProperties": false,
+            "properties": {
+                "model": {"type": "string", "example": "Qwen/Qwen2.5-0.5B-Instruct-GGUF"},
+                "source": {"type": "string", "enum": ["modelscope", "hf-mirror", "huggingface"]},
+                "revision": {"type": "string", "example": "main"},
+                "variant_id": {"type": "string", "example": "qwen2.5-0.5b-instruct-q4_k_m.gguf"},
+                "checksum": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
+                "backend": {"type": "string", "enum": ["auto", "cpu", "cuda"], "default": "auto"}
+            }
+        },
+        "AutoDeploymentSubmitResponse": {
+            "type": "object",
+            "required": ["success", "data", "reused"],
+            "properties": {
+                "success": {"type": "boolean", "example": true},
+                "reused": {"type": "boolean", "description": "Whether the request joined an existing queued or running task."},
+                "data": {"$ref": "#/components/schemas/AutoDeploymentData"}
+            }
+        },
+        "AutoDeploymentQueryResponse": {
+            "type": "object",
+            "required": ["success", "data"],
+            "properties": {
+                "success": {"type": "boolean", "example": true},
+                "data": {"$ref": "#/components/schemas/AutoDeploymentData"}
+            }
+        },
+        "AutoDeploymentData": {
+            "type": "object",
+            "required": ["task_id", "status", "model", "source", "revision", "variant_id", "backend", "stage", "cancel_requested", "model_download", "runtime", "deployment", "ready_to_chat", "error", "cleanup_error", "created_at", "updated_at", "finished_at"],
+            "properties": {
+                "task_id": {"type": "string", "format": "uuid"},
+                "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled", "interrupted"]},
+                "model": {"type": "string"},
+                "source": {"type": "string", "enum": ["modelscope", "hf-mirror", "huggingface"]},
+                "revision": {"type": "string"},
+                "variant_id": {"type": "string"},
+                "backend": {"type": "string", "enum": ["auto", "cpu", "cuda"]},
+                "stage": {"type": "string", "enum": ["preflight", "preparing_runtime", "downloading_model", "verifying", "starting", "health_checking", "attaching_route"]},
+                "cancel_requested": {"type": "boolean"},
+                "model_download": {"$ref": "#/components/schemas/AutoDeploymentProgress"},
+                "runtime": {"$ref": "#/components/schemas/AutoDeploymentProgress"},
+                "deployment": {"$ref": "#/components/schemas/AutoDeploymentView", "nullable": true},
+                "ready_to_chat": {"type": "boolean", "description": "True only when the task is succeeded and the current process and route are healthy and routable."},
+                "error": {"$ref": "#/components/schemas/AutoDeploymentTaskError", "nullable": true},
+                "cleanup_error": {"$ref": "#/components/schemas/AutoDeploymentTaskError", "nullable": true},
+                "created_at": {"type": "string", "format": "date-time"},
+                "updated_at": {"type": "string", "format": "date-time"},
+                "finished_at": {"type": "string", "format": "date-time", "nullable": true}
+            }
+        },
+        "AutoDeploymentProgress": {
+            "type": "object",
+            "required": ["status", "stage", "detail", "task_id", "completed_bytes", "total_bytes", "download_speed", "actual_sha256", "error"],
+            "properties": {
+                "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed", "cancelled", "interrupted"]},
+                "stage": {"type": "string", "nullable": true},
+                "detail": {"type": "string", "nullable": true},
+                "task_id": {"type": "string", "nullable": true},
+                "completed_bytes": {"type": "integer", "format": "int64", "minimum": 0},
+                "total_bytes": {"type": "integer", "format": "int64", "minimum": 0, "nullable": true},
+                "download_speed": {"type": "integer", "format": "int64", "minimum": 0},
+                "actual_sha256": {"type": "string", "nullable": true},
+                "error": {"$ref": "#/components/schemas/AutoDeploymentTaskError", "nullable": true}
+            }
+        },
+        "AutoDeploymentView": {
+            "type": "object",
+            "required": ["model_id", "generation", "route_attachment_id", "process_ready", "route_status", "observed_at"],
+            "properties": {
+                "model_id": {"type": "string"},
+                "generation": {"type": "integer", "format": "int64", "nullable": true},
+                "route_attachment_id": {"type": "integer", "nullable": true},
+                "process_ready": {"type": "boolean"},
+                "route_status": {"type": "string", "nullable": true},
+                "observed_at": {"type": "string", "nullable": true}
+            }
+        },
+        "AutoDeploymentTaskError": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+                "code": {"type": "string"},
+                "message": {"type": "string"}
+            }
+        },
+        "AutoDeploymentErrorResponse": {
+            "type": "object",
+            "required": ["success", "error"],
+            "properties": {
+                "success": {"type": "boolean", "example": false},
+                "error": {"$ref": "#/components/schemas/AutoDeploymentTaskError"}
             }
         },
         "DownloadModelRequest": {

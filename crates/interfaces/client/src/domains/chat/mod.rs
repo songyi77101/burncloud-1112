@@ -2,6 +2,7 @@
 
 mod backend;
 mod catalog;
+mod inference;
 mod model;
 mod page;
 mod selector;

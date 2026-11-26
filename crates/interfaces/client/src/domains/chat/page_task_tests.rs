@@ -52,6 +52,7 @@ impl ChatBackend for DelayedBackend {
                 path: "model.gguf".into(),
             });
             Ok(PreparedModel {
+                route_model_id: None,
                 model: request.model,
                 variant: request.variant,
                 actual_sha256: LOCAL_DIGEST.into(),

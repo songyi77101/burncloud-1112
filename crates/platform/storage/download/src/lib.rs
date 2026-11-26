@@ -2,6 +2,8 @@
 
 mod catalog;
 mod error;
+#[allow(dead_code, reason = "任务 003 的 HTTP 传输接入后移除此阶段标注")]
+mod http;
 mod manager;
 mod monitor;
 mod operations;

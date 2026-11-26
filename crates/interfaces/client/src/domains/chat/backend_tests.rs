@@ -553,6 +553,7 @@ impl ChatBackend for ControlledBackend {
                 callback(event);
             }
             Ok(PreparedModel {
+                route_model_id: None,
                 model: request.model,
                 variant: request.variant,
                 actual_sha256: DEMO_DIGEST.into(),
@@ -600,6 +601,7 @@ fn changed_artifact_identity_invalidates_only_that_version_and_generation_uses_c
         .variants
         .iter()
         .map(|variant| PreparedModel {
+            route_model_id: None,
             model: model.clone(),
             variant: variant.clone(),
             actual_sha256: DEMO_DIGEST.into(),

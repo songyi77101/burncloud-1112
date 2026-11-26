@@ -5,6 +5,16 @@ pub mod api;
 pub mod logging;
 // 本地路由配置与启动生命周期管理保持私有，避免绕过服务启动校验。
 mod local_routes;
+#[allow(
+    dead_code,
+    reason = "本机部署仓储由后续部署执行任务接入；本任务先固定持久化契约和 CAS 边界"
+)]
+mod model_deployment;
+#[allow(
+    dead_code,
+    reason = "本机部署仓储由后续部署执行任务接入；本任务先固定持久化契约和 CAS 边界"
+)]
+mod model_deployment_store;
 mod model_selection;
 pub mod node_attachment;
 // 声明 node_deployment 子模块（私有，仅本模块可见）：节点部署状态管理（前面分析过的 DeploymentEventStore / NodeDeploymentState）
@@ -423,6 +433,9 @@ pub async fn start_server(host: &str, port: u16, enable_liveview: bool) -> anyho
     // 管理器和 HTTP 服务由同一个 select 生命周期持有，确保取消时关闭本地挂载准入。
     let manager = LocalRouteManager::new(db.clone(), attachments)?;
     let app = create_app(db, enable_liveview, jwt_secret, internal_secret).await?;
+    // 先完成管理会话激活和旧挂载清理，再绑定 HTTP 监听器，避免首个动态部署
+    // 与本机路由管理器的启动窗口竞争而得到不可重试的准入失败。
+    manager.initialize().await?;
 
     // 解析监听地址
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;

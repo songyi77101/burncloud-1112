@@ -29,6 +29,7 @@ pub mod channel;
 mod hardware;
 // 声明 log 子模块（公开）：日志相关路由
 pub mod log;
+mod model_deployments;
 mod model_download;
 pub(crate) mod model_resolution;
 // 声明 monitor 子模块（公开）：监控相关路由
@@ -72,6 +73,7 @@ pub fn routes(state: AppState) -> Router {
         .merge(auth::public_routes())
         .merge(hardware::routes())
         .merge(model_download::routes())
+        .merge(model_deployments::routes())
         .merge(model_resolution::routes())
         // 合并节点部署路由（启动/查询/停止部署）
         .merge(node_deployment::routes())

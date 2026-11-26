@@ -82,6 +82,7 @@ async fn backend_deploy_default_and_client_initialization_errors_are_explicit() 
     let backend = HttpBackend {
         local: LocalBackend,
         hardware_client: Err(error.clone()),
+        api_token: None,
     };
     let received = backend
         .deploy_model("model.gguf".into())
@@ -114,6 +115,7 @@ async fn http_backend_deploy_delegates_and_preserves_health_error() {
     let backend = HttpBackend {
         local: LocalBackend,
         hardware_client: CatalogClient::new(&base, std::time::Duration::from_secs(2)),
+        api_token: None,
     };
     let error = backend
         .deploy_model("model.gguf".into())

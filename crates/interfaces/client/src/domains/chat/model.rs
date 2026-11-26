@@ -289,6 +289,8 @@ pub(super) struct PreparedModel {
     pub(super) variant: ModelVariant,
     pub(super) actual_sha256: String,
     pub(super) local_path: String,
+    /// 服务端自动部署后返回的真实路由模型标识；旧本地替身为空。
+    pub(super) route_model_id: Option<String>,
 }
 impl PreparedModel {
     /// 校验后端成功凭据，不访问磁盘；真实文件校验属于后端职责。

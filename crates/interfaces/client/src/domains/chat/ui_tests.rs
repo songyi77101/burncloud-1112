@@ -860,6 +860,7 @@ impl ChatBackend for DeploymentBackend {
                 path: "path.gguf".into(),
             });
             Ok(PreparedModel {
+                route_model_id: None,
                 model: request.model,
                 variant: request.variant,
                 actual_sha256: DEMO_DIGEST.into(),

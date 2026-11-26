@@ -68,6 +68,7 @@ fn detected(state: &mut ChatState, id: u64, hardware: DemoHardware) {
 fn prepared(state: &ChatState) -> PreparedModel {
     let p = state.preparation().expect("卡片");
     PreparedModel {
+        route_model_id: None,
         model: p.model.clone(),
         variant: p.variant().expect("版本").clone(),
         actual_sha256: DEMO_DIGEST.into(),
@@ -1051,6 +1052,7 @@ fn catalog_artifact() -> (ChatState, u64, PreparedModel) {
     );
     let p = state.preparation().expect("卡片");
     let ready = PreparedModel {
+        route_model_id: None,
         model: p.model.clone(),
         variant: p.variant().expect("版本").clone(),
         actual_sha256: DEMO_DIGEST.into(),
