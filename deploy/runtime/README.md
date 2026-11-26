@@ -1,56 +1,83 @@
-# BurnCloud 受管运行时资源（llama.cpp b8581）
+# BurnCloud 受管运行时资源（方案二：Gitee 运行期获取）
 
-[`manifest.json`](manifest.json) 是固定**源包登记**，不是可直接用于发行的锁定清单。它不含归档库存、安装程序摘要、授权或签名结果。不允许通过部署请求、本机 `target`、系统 `PATH` 或 `ready.json` 替换登记值。
+`manifest.json` 是服务端可信运行时清单。它只登记固定 Gitee 资源的身份和安全边界，不接受部署请求、本机 Cargo target、系统 `PATH` 或缓存元数据覆盖。
 
-| Cargo `TARGET` | 唯一离线基础包 | `auto` 的候选顺序 |
-| --- | --- | --- |
-| `x86_64-pc-windows-msvc` | Windows x64 CPU ZIP | CPU |
-| `aarch64-apple-darwin` | macOS ARM64 原生 tar.gz | Metal（实测可用时）、CPU |
-| `x86_64-apple-darwin` | macOS x64 原生 tar.gz | Metal（实测可用时）、CPU |
-| `x86_64-unknown-linux-gnu` | Ubuntu 24.04 x64 CPU tar.gz | CPU |
+## 固定来源
 
-`auto_backends` 只是候选策略，不证明任何设备可用；显式 `cpu` 不使用 GPU。只有 Windows x64 显式选择 `cuda` 才在线获取 CUDA 12.4 服务 ZIP 和 cudart ZIP，地址仅由 `targets.x86_64-pc-windows-msvc.cuda.download_base_url` 与两个固定文件名拼接。客户端不查询 GitHub API、不回退直连 GitHub 或其他镜像，也不因 CUDA 失败降到 CPU。CUDA 两个 ZIP 都不内嵌，且不得改签换包或用不同摘要。cudart ZIP 不提供可启动程序。
-
-## 发行资源准备（任务 006/007 接入）
-
-1. 在显式指定的 CI 资源目录中按目标准备归档。发行环境可以用 `source_base_url` 下载固定源包；先验证长度和 SHA-256，再枚举内容。HTML、缺文件或校验不符都失败。源包和准备后的归档分开存放；不把大文件、源包缓存或生成的发行锁提交到仓库，不读取或覆盖用户 `target`。
-2. 在目标系统基线上查出实际动态依赖，记录由基线、同包或受管依赖满足的来源。Ubuntu 额外的合法再分发 `.so` 并入同一基础包并审核 `$ORIGIN` 等相对加载路径，不替换系统 glibc。macOS 如需修正相对加载路径，先修正，再对 Mach-O/dylib 由内到外签名并验证签名、公证；不在用户端重签或禁用 Gatekeeper。Windows 必须取得独立的 `vc_redist.x64.exe`，锁定实际字节、微软 Authenticode 签名及再分发授权；提取给用户确认安装，不由 BurnCloud 静默执行。
-3. 核对归档及附带内容的全部再分发权。`license_components` 是源包至少应覆盖的审计项，不是授权结论或完整的传递依赖清单。凡归档中缺少的必要 LICENSE / NOTICE，须以独立、经核验的资源提供并随发行物保留。Windows 的 CPU ZIP 与 CUDA 服务 ZIP 均含 `libomp140.x86_64.dll`，不能拿 llama.cpp 的许可证或 VC++ 安装程序授权代替对该 DLL 的审核。依赖修正引入的新内容同样要有证据。
-4. 对发行实际使用的归档重新散列、测量压缩长度并生成库存。原样使用时源 SHA 与内嵌 SHA 相同；派生归档不得使用源摘要或源库存冒充。将最终资源及 `manifest.lock.json` 交给 `BURNCLOUD_RUNTIME_ASSET_DIR`。启用 `bundled-runtime` 的构建只读本地资源，内嵌一个基础归档和本目标所需依赖/许可；不在构建期下载，也不接受没有锁定证据的资源。
-
-## 发行锁定清单 v1（每个目标一份）
-
-锁文件由发行准备工具生成，不提供可被误用的示例库存、空摘要或「已通过」占位记录。所有 `sha256` 值为实际内容的 64 个小写十六进制字符；所有字节数为非负整数。文件名必须等于登记名；派生包可保留相同 basename，但不得覆盖源包。
-
-| `manifest.lock.json` 根字段 | 内容 |
+| 字段 | 固定值 |
 | --- | --- |
-| `schema_version`, `version`, `target` | 格式版本 `1`、固定 `b8581`、本次构建的精确 Cargo `TARGET`。 |
-| `base` | 唯一基础归档的锁定项，字段见下。 |
-| `dependencies` | 键为 `required_dependencies` 中的文件名；条目包含实际文件记录、`signature_evidence` 和 `licenses`。Windows 必须有 VC++ 安装程序项，其他三个目标此字段为空对象。 |
-| `cuda` | 仅 Windows 的独立 CUDA 发布证据可含此项。包含固定 `server` 和 `cudart` 的锁定项及 `approved_collisions`；缺项不是已认证 CUDA。普通发行不内嵌 CUDA ZIP。 |
+| provider | `gitee` |
+| repository | `songyi777/llama-cpp` |
+| commit | `51d01f6e526bc6d45b9d252b1d2d487efb6625d8` |
+| version | `b12757` |
+| raw URL | `https://gitee.com/songyi777/llama-cpp/raw/<commit>/<filename>` |
+| 生产期动态发现 | 禁止；Gitee API 只用于资源登记或人工刷新 |
 
-| 归档锁定项字段 | 内容 |
-| --- | --- |
-| `filename`, `package_kind`, `source_size_bytes`, `source_sha256` | 对应登记项，绑定上游源身份。 |
-| `embedded_size_bytes`, `embedded_sha256` | `base` 必填，指实际内嵌归档。CUDA 为在线固定资源，只使用 `source_size_bytes` / `source_sha256`，不写 `embedded_*`。 |
-| `unpacked_bytes`, `server_relative_path`, `inventory` | 受审展开字节上限、唯一固定服务端相对路径（cudart 不写）、最终归档完整库存。展开上限同时受 manifest 的全局资源限制约束。 |
-| `dependency_audit` | 目标基线上的动态依赖审计文件记录，列出依赖库来源、相对加载规则和核验结果；基础包和 CUDA 组合分别核对。 |
-| `licenses` | 逐组件记录：`component`、覆盖的归档相对路径 `paths`、随发行保留的 `notices` 文件记录；有独立再分发条件时，还必须提供对应的 `redistribution_evidence` 文件记录。VC++ 安装程序必须提供该授权证据。 |
-| `signature_evidence`, `notarization_evidence` | macOS 基础包必须有绑定最终归档的签名验证和公证文件记录；Windows VC++ 项必须有绑定实际安装程序的签名验证记录。仅填名称、版本或布尔值不算证据。 |
+生产下载只由服务端把固定 `commit` 与 manifest 中的文件名拼接为 raw URL。客户端不能提交版本、commit、URL、SHA-256、文件名或解压路径，也不使用 `git clone`、`contents` Base64 或 aria2。
 
-文件记录形状为 `path`, `size_bytes`, `sha256`。`path` 是相对于本次 CI 资源根的受限路径；逐项核文件实际长度和摘要。包含许可证据的文件记录不能代替对许可证适用范围和签名结果的检查。
+## 受管目标资源
 
-库存按规范化相对路径排序、去重。`inventory` 的每项包含 `path`, `kind`, `mode`；摘要和大小只用于 `file`，目标路径只用于链接：
+| Cargo `TARGET` | 有效 backend | 包类型 | 文件名 | 格式 | 字节数 | SHA-256 | 服务端路径 |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+| `x86_64-pc-windows-msvc` | `cpu` | `cpu` | `llama-b12757-bin-win-cpu-x64.zip` | `zip` | `25262139` | `5482ac02398d674107b56b3b201485b15c9ee60c3b996f864c04f5367ece0c8d` | `llama-server.exe` |
+| `aarch64-apple-darwin` | `cpu`, `metal` | `native` | `llama-b12757-bin-macos-arm64.tar.gz` | `tar.gz` | `16862081` | `873b413c5d4a336ae623bedde8f755a3ed81b18bc6ae4b01f5a0f6fcea63754c` | `llama-b12757/llama-server` |
+| `x86_64-apple-darwin` | `cpu`, `metal` | `native` | `llama-b12757-bin-macos-x64.tar.gz` | `tar.gz` | `12591660` | `f330d7bf9baff5cc401c06524618f9eaf8962439dcb9e11fa638f8e3b0bee14b` | `llama-b12757/llama-server` |
+| `x86_64-unknown-linux-gnu` | `cpu` | `cpu` | `llama-b12757-bin-ubuntu-x64.tar.gz` | `tar.gz` | `23425964` | `99e34cc6a39f3afda735d43d76d15d6ead2297406cc9c0cf421b771fd3a1a84a` | `llama-b12757/llama-server` |
 
-| `kind` | 必填附加字段 | 含义 |
-| --- | --- | --- |
-| `file` | `size_bytes`, `sha256` | 最终安装的普通文件字节。 |
-| `directory` | 无 | 必要目录，包括安装后需核对权限的隐式目录。 |
-| `symlink` | `target` | 相对于链接所在目录的目标，解析后必须在同一安装根内。 |
-| `hardlink` | `target` | 相对于安装根的已审核普通文件路径。 |
+上述大小和摘要是归档实体的字节数与完整 SHA-256，不是 Git blob id、Gitee API 的 Git `sha`、解压目录大小或发行物体积。登记或刷新资源时必须对实际下载字节重新计算，不能复制旧版本摘要。
 
-`mode` 是审核后允许的 Unix 权限位整数，不保留 suid/sgid 或多余写权限；Windows 条目和不单独审计权限的符号链接记录 `null`。路径使用 `/`，拒绝绝对路径、越界、重名和大小写冲突；链接不能成环，也不能经由链接写入条目。CUDA 合并前两个包各自必须通过压缩摘要和库存核验；同路径同内容可复用。同路径不同内容默认拒绝，`approved_collisions` 只能列出经审查的冲突，每项包含 `path`, `server_sha256`, `cudart_sha256`, `selected`（`server` 或 `cudart`），且散列须与两份库存对应。未看到冲突时不补白名单条目。
+本清单只包含四个桌面/Ubuntu CPU 或 Metal 目标：
 
-## 放行与信任边界
+- Windows x64 只登记 CPU；
+- macOS x64 和 ARM64 登记 CPU、Metal 两种请求能力，但共享同一平台归档；
+- Ubuntu x64 只登记 CPU；
+- `xcframework` 不属于桌面 `llama-server` target 映射；
+- Gitee 当前没有 CUDA 归档，不生成 CUDA 条目。请求 CUDA 时由运行时准备器返回 `unsupported_backend`，不得下载 CPU 包冒充 CUDA 或静默降级。
 
-缺真实字节、完整库存、依赖核验、适用授权或签名/公证时，阻断相应目标或 CUDA 的发布，不填占位或提供跳过开关。缓存重用以编入的归档 SHA 和经审核的只读库存为依据，重新校验文件、路径、链接和权限；`ready.json` 只记状态。归档 SHA、锁文件和构建成功都不等于干净系统上的真实启动、设备探测或 BurnCloud 数据面回答；这些证据需独立验收。
+## 可信校验契约
+
+读取 manifest 和选择目标时，服务端必须拒绝以下情况，并将配置错误映射为 `runtime_manifest_invalid`；backend 不在目标允许集合时映射为 `unsupported_backend`：
+
+- `provider`、`repository`、`commit` 或 `version` 偏离固定值；
+- target 不在四个登记 target 中，或目标与当前编译平台不匹配；
+- 文件名不是单一基名，含路径分隔符、空字节或控制字符；
+- `archive_format` 与扩展名、目标平台不匹配；
+- 文件大小为零、超出下载预算，或与实际归档长度不一致；
+- SHA-256 不是 64 位连续小写十六进制，或完整归档重算结果不匹配；
+- `server_relative_path` 为绝对路径、包含 `..`、驱动器前缀或越出解压根；
+- 归档限制不是正数，或超过服务端硬上限；
+- 运行时请求要求 CUDA、其他未登记 backend 或未登记目标。
+
+manifest 是服务端配置，不是客户端可扩展的 JSON。校验失败不能通过选择旧版本、其他 target 或另一种 backend 来掩盖。
+
+## 解压与运行时安全边界
+
+默认展开限制登记在 `manifest.json`：最大路径 4096 字节、最大 entry 数 100000、单文件最大 2 GiB、总展开最大 4 GiB。运行时实现还必须拒绝绝对路径、`..` 穿越、越出 staging 的符号链接/硬链接和超出资源限制的归档；解压后必须找到 manifest 指定的普通文件 `server_relative_path`。
+
+`ready` 标记只用于缓存加速，不能代替再次检查文件存在、路径边界、版本、摘要、依赖和 backend 探测。运行时缓存写入用户数据目录，不写入安装目录、项目目录或 `target`。
+
+## 来源优先级与接口边界
+
+运行时准备顺序固定为：
+
+1. 管理员显式配置 `BURNCLOUD_LLAMA_SERVER`；
+2. 已校验的用户缓存；
+3. 固定 commit 的 Gitee raw 下载。
+
+方案二继续复用自动部署的 POST/GET/DELETE 接口，运行时下载、校验、解压、探测和缓存提交作为部署任务的 `preparing_runtime` 子阶段展示；不增加 runtime 管理 HTTP API。模型 GGUF 下载、`DeploymentService` 进程生命周期、健康检查和路由绑定不由本清单改变。
+
+## 资源登记复核
+
+资源登记或人工刷新必须对固定 commit 的实际归档执行：
+
+```powershell
+$file = Get-Item '.\llama-b12757-bin-win-cpu-x64.zip'
+$file.Length
+Get-FileHash $file.FullName -Algorithm SHA256
+```
+
+登记工具应比较实际长度与 `size_bytes`、比较完整 SHA-256 与 `sha256`，并在不匹配时失败；不得使用 Git blob id 代替归档 SHA-256。四个平台的真实目标机启动、依赖、许可证、Metal 设备能力和对话验收属于后续任务，未完成前不得宣称目标已支持。
+
+## 历史方案说明
+
+旧的 b8581 内嵌运行时清单和发行说明由历史任务 005–025 保留，不作为方案二的默认运行时回退。若后续需要离线发行，应另立增强任务，不得在本清单中偷偷恢复内嵌回退。

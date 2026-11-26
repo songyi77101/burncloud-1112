@@ -1,7 +1,10 @@
 {
-  "schema_version": 1,
-  "version": "b8581",
-  "source_base_url": "https://github.com/ggml-org/llama.cpp/releases/download/b8581/",
+  "schema_version": 2,
+  "provider": "gitee",
+  "repository": "songyi777/llama-cpp",
+  "commit": "51d01f6e526bc6d45b9d252b1d2d487efb6625d8",
+  "version": "b12757",
+  "raw_url_template": "https://gitee.com/songyi777/llama-cpp/raw/{commit}/{filename}",
   "archive_limits": {
     "max_path_bytes": 4096,
     "max_entries": 100000,
@@ -10,65 +13,54 @@
   },
   "targets": {
     "x86_64-pc-windows-msvc": {
-      "auto_backends": ["cpu"],
-      "base": {
+      "supported_backends": ["cpu"],
+      "package": {
         "package_kind": "cpu",
-        "filename": "llama-b8581-bin-win-cpu-x64.zip",
-        "source_size_bytes": 38707858,
-        "source_sha256": "71fffc57588b12142a1f0b37f8a1f0a1b122d14f70435f3689dd6399ba4317e7",
+        "filename": "llama-b12757-bin-win-cpu-x64.zip",
+        "archive_format": "zip",
+        "size_bytes": 25262139,
+        "sha256": "5482ac02398d674107b56b3b201485b15c9ee60c3b996f864c04f5367ece0c8d",
         "server_relative_path": "llama-server.exe",
+        "dependencies": [],
         "license_components": ["llama.cpp", "libomp140.x86_64.dll"]
-      },
-      "required_dependencies": ["vc_redist.x64.exe"],
-      "cuda": {
-        "download_base_url": "https://gh-proxy.com/https://github.com/ggml-org/llama.cpp/releases/download/b8581/",
-        "server": {
-          "package_kind": "cuda12.4",
-          "filename": "llama-b8581-bin-win-cuda-12.4-x64.zip",
-          "source_size_bytes": 232525426,
-          "source_sha256": "0be0ef75d1544e836ba8e90c4fe02cad253cb8983ebcb68ac774183a28f400d5",
-          "server_relative_path": "llama-server.exe",
-          "license_components": ["llama.cpp", "libomp140.x86_64.dll", "ggml-cuda.dll"]
-        },
-        "cudart": {
-          "package_kind": "cuda12.4",
-          "filename": "cudart-llama-bin-win-cuda-12.4-x64.zip",
-          "source_size_bytes": 391443627,
-          "source_sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
-          "license_components": ["nvidia-cuda-12.4"]
-        }
       }
     },
     "aarch64-apple-darwin": {
-      "auto_backends": ["metal", "cpu"],
-      "base": {
+      "supported_backends": ["cpu", "metal"],
+      "package": {
         "package_kind": "native",
-        "filename": "llama-b8581-bin-macos-arm64.tar.gz",
-        "source_size_bytes": 39574927,
-        "source_sha256": "0c79d0c1370c81137d58cdc720881dfbab67cae02769d9eaf895f127d0785056",
-        "server_relative_path": "llama-b8581/llama-server",
+        "filename": "llama-b12757-bin-macos-arm64.tar.gz",
+        "archive_format": "tar.gz",
+        "size_bytes": 16862081,
+        "sha256": "873b413c5d4a336ae623bedde8f755a3ed81b18bc6ae4b01f5a0f6fcea63754c",
+        "server_relative_path": "llama-b12757/llama-server",
+        "dependencies": [],
         "license_components": ["llama.cpp"]
       }
     },
     "x86_64-apple-darwin": {
-      "auto_backends": ["metal", "cpu"],
-      "base": {
+      "supported_backends": ["cpu", "metal"],
+      "package": {
         "package_kind": "native",
-        "filename": "llama-b8581-bin-macos-x64.tar.gz",
-        "source_size_bytes": 100650354,
-        "source_sha256": "e03188ae51dc1c3ba8d2a5d6220ac0d6639a47db64af4d0c93bc05b494a98d0b",
-        "server_relative_path": "llama-b8581/llama-server",
+        "filename": "llama-b12757-bin-macos-x64.tar.gz",
+        "archive_format": "tar.gz",
+        "size_bytes": 12591660,
+        "sha256": "f330d7bf9baff5cc401c06524618f9eaf8962439dcb9e11fa638f8e3b0bee14b",
+        "server_relative_path": "llama-b12757/llama-server",
+        "dependencies": [],
         "license_components": ["llama.cpp"]
       }
     },
     "x86_64-unknown-linux-gnu": {
-      "auto_backends": ["cpu"],
-      "base": {
+      "supported_backends": ["cpu"],
+      "package": {
         "package_kind": "cpu",
-        "filename": "llama-b8581-bin-ubuntu-x64.tar.gz",
-        "source_size_bytes": 31371639,
-        "source_sha256": "8424fecb5a260f15a3aa90016a47242621881b78dc5ebb4cb418d0134d5cbe43",
-        "server_relative_path": "llama-b8581/llama-server",
+        "filename": "llama-b12757-bin-ubuntu-x64.tar.gz",
+        "archive_format": "tar.gz",
+        "size_bytes": 23425964,
+        "sha256": "99e34cc6a39f3afda735d43d76d15d6ead2297406cc9c0cf421b771fd3a1a84a",
+        "server_relative_path": "llama-b12757/llama-server",
+        "dependencies": [],
         "license_components": ["llama.cpp"]
       }
     }
