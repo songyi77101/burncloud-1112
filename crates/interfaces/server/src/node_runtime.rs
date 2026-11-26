@@ -12,6 +12,8 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
+#[allow(dead_code, reason = "任务 031 将运行时准备器接入安全解压器")]
+mod archive;
 #[allow(dead_code, reason = "任务 031 将缓存组件接入运行时准备器")]
 mod cache;
 

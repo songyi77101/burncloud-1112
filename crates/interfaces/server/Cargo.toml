@@ -43,6 +43,9 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 sha2.workspace = true
 futures-util.workspace = true
+zip.workspace = true
+flate2 = "1.1"
+tar = "0.4"
 
 [dev-dependencies]
 async-trait.workspace = true
