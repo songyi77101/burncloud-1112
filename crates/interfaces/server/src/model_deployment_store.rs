@@ -638,12 +638,14 @@ fn validate_estimate(estimate: &DeploymentEstimate) -> Result<(), TaskError> {
 }
 
 fn validate_ownership(ownership: &DeploymentOwnership) -> Result<(), TaskError> {
-    let id_suffix = ownership.model_id.strip_prefix("bc").unwrap_or_default();
     if !is_hex_digest(&ownership.deployment_key)
         || !is_hex_digest(&ownership.runtime_fingerprint)
-        || id_suffix.len() != 32
-        || !id_suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || id_suffix != id_suffix.to_ascii_lowercase()
+        || ownership.model_id.trim().is_empty()
+        || ownership.model_id.len() > 128
+        || !ownership
+            .model_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
         || ownership.originating_session.is_nil()
     {
         return Err(TaskError::storage("部署归属证明损坏"));

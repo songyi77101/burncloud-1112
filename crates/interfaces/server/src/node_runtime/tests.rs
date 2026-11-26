@@ -3,7 +3,7 @@
     reason = "测试使用临时工件并通过断言呈现计划错误。"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use burncloud_node_runtime::{
     deployment::{DeploymentEventPublisher, DeploymentService, HttpProbe, LocalProcessManager},
@@ -20,6 +20,75 @@ use tempfile::NamedTempFile;
 use tokio::time::sleep;
 
 use super::LlamaCppRuntimeAdapter;
+
+#[test]
+fn runtime_resolution_finds_the_portable_runtime_without_environment_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path().join("burncloud.exe");
+    fs::write(&app, b"app").unwrap();
+    let bundled = directory
+        .path()
+        .join("runtime")
+        .join("bin")
+        .join(if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        });
+    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    fs::write(&bundled, b"runtime").unwrap();
+
+    let resolved = super::resolve_llama_server(None, &app).unwrap();
+
+    assert_eq!(resolved, bundled);
+}
+
+#[test]
+fn runtime_resolution_keeps_explicit_configuration_precedence() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path().join("burncloud.exe");
+    fs::write(&app, b"app").unwrap();
+    let bundled = directory
+        .path()
+        .join("runtime")
+        .join("bin")
+        .join(if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        });
+    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    fs::write(&bundled, b"runtime").unwrap();
+    let configured = directory.path().join("custom-llama-server");
+    fs::write(&configured, b"custom runtime").unwrap();
+
+    let resolved = super::resolve_llama_server(Some(configured.clone()), &app).unwrap();
+
+    assert_eq!(resolved, configured);
+}
+
+#[test]
+fn runtime_resolution_does_not_fall_back_when_explicit_configuration_is_invalid() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path().join("burncloud.exe");
+    fs::write(&app, b"app").unwrap();
+    let bundled = directory
+        .path()
+        .join("runtime")
+        .join("bin")
+        .join(if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        });
+    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    fs::write(&bundled, b"runtime").unwrap();
+    let missing = PathBuf::from(directory.path()).join("missing-llama-server");
+
+    let error = super::resolve_llama_server(Some(missing.clone()), &app).unwrap_err();
+
+    assert!(error.contains(&missing.display().to_string()));
+}
 
 #[tokio::test]
 #[ignore = "需要本机 llama-server 与 GGUF 模型"]

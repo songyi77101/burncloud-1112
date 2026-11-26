@@ -5,7 +5,11 @@ use burncloud_node_runtime::{
     RuntimeRequest,
 };
 use reqwest::Url;
-use std::{io::Write, path::PathBuf, sync::Mutex};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tempfile::NamedTempFile;
 
 #[derive(Debug, Default)]
@@ -25,26 +29,70 @@ impl RuntimePreparer for LlamaCppRuntimePreparer {
             )));
         }
 
-        // 由部署环境显式指定二进制，避免从 PATH 中静默选择到不同版本。
-        let executable = std::env::var_os("BURNCLOUD_LLAMA_SERVER")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                RuntimePrepareError::PrepareFailed(
-                    "BURNCLOUD_LLAMA_SERVER must point to llama-server".to_string(),
-                )
-            })?;
-        // 仅检查目标存在为普通文件；实际启动权限和可执行格式由进程启动阶段报告。
-        if !executable.is_file() {
-            return Err(RuntimePrepareError::PrepareFailed(format!(
-                "llama-server executable does not exist: {}",
-                executable.display()
-            )));
-        }
+        // 显式配置优先；便携发行未配置环境变量时只查找程序旁受管目录，不依赖 PATH。
+        let app_executable = std::env::current_exe().map_err(|error| {
+            RuntimePrepareError::PrepareFailed(format!(
+                "无法定位 BurnCloud 可执行文件以查找随附运行时：{error}"
+            ))
+        })?;
+        let executable = resolve_llama_server(
+            std::env::var_os("BURNCLOUD_LLAMA_SERVER").map(PathBuf::from),
+            &app_executable,
+        )
+        .map_err(RuntimePrepareError::PrepareFailed)?;
 
         Ok(PreparedRuntime {
             executable: executable.to_string_lossy().into_owned(),
         })
     }
+}
+
+fn resolve_llama_server(
+    configured: Option<PathBuf>,
+    app_executable: &Path,
+) -> Result<PathBuf, String> {
+    if let Some(executable) = configured {
+        // 显式路径有误时不静默回退到另一份运行时，避免用户配置被忽略。
+        return if executable.is_file() {
+            Ok(executable)
+        } else {
+            Err(format!(
+                "llama-server executable does not exist: {}",
+                executable.display()
+            ))
+        };
+    }
+
+    let app_directory = app_executable
+        .parent()
+        .ok_or_else(|| "无法确定 BurnCloud 可执行文件所在目录".to_string())?;
+    let executable_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
+    let candidates = [
+        app_directory
+            .join("runtime")
+            .join("bin")
+            .join(executable_name),
+        app_directory
+            .join("runtime")
+            .join("llama-b8581")
+            .join(executable_name),
+        app_directory.join("runtime").join(executable_name),
+        app_directory.join("bin").join(executable_name),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            format!(
+                "BurnCloud 发行目录中未找到 llama-server；请随程序提供 runtime 运行时，或设置 BURNCLOUD_LLAMA_SERVER。程序目录：{}",
+                app_directory.display()
+            )
+        })
 }
 
 #[derive(Debug)]

@@ -513,6 +513,7 @@ fn catalog_variants_download_verify_then_enter_artifact_ready() {
     );
 
     let prepared = PreparedModel {
+        route_model_id: None,
         model: request.model,
         variant: request.variant,
         actual_sha256: digest,

@@ -192,6 +192,39 @@ struct DeployRequest<'a> {
     model_path: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct AutoDeployRequest<'a> {
+    model: &'a str,
+    source: &'a str,
+    revision: &'a str,
+    variant_id: &'a str,
+    checksum: &'a str,
+    backend: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoDeployEnvelope {
+    success: bool,
+    data: Option<AutoDeployData>,
+    error: Option<RemoteHardwareError>,
+    #[serde(default)]
+    _reused: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoDeployData {
+    task_id: String,
+    status: String,
+    ready_to_chat: bool,
+    deployment: Option<AutoDeployDeployment>,
+    error: Option<RemoteHardwareError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AutoDeployDeployment {
+    model_id: String,
+}
+
 #[allow(
     clippy::disallowed_types,
     reason = "部署协议不约束事件内容，需要原样持有"
@@ -251,7 +284,9 @@ const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 // 容量探测可能在首次 Ready 之后才完成；客户端只做有限的展示状态收敛，不能阻塞
 // Node 部署本身，也不能因为查询失败撤销已经提交的部署。
+#[allow(dead_code, reason = "旧路由状态兼容测试仍覆盖有限收敛逻辑")]
 const ROUTE_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+#[allow(dead_code, reason = "旧路由状态兼容测试仍覆盖有限收敛逻辑")]
 const ROUTE_STATUS_POLL_ATTEMPTS: usize = 20;
 
 #[derive(Debug, Deserialize)]
@@ -370,6 +405,20 @@ pub(super) struct UnavailableReason {
 }
 
 impl CatalogClient {
+    pub(super) fn http_client(&self) -> &Client {
+        &self.client
+    }
+
+    pub(super) fn router_url(&self) -> Result<Url, ChatError> {
+        self.base.join("/").map_err(|error| {
+            failure(
+                ErrorKind::InvalidParameter,
+                Operation::Generate,
+                format!("主服务地址无效：{error}"),
+            )
+        })
+    }
+
     /// 请求统一主服务，默认跟随 HOST/PORT，可用 BURNCLOUD_SERVER_URL 指向远程主服务。
     ///
     /// # Examples
@@ -695,6 +744,168 @@ impl CatalogClient {
         snapshot.into_hardware()
     }
 
+    /// 提交并轮询目录模型的异步部署任务。
+    ///
+    /// # Examples
+    ///
+    /// 该调用只提交目录身份和摘要，不把本地路径或数据面令牌交给服务端。
+    ///
+    /// # Notes
+    ///
+    /// 任务必须返回 `ready_to_chat=true` 和服务端生成的 `model_id`；失败不会回退到
+    /// 旧的手动部署接口。
+    #[allow(
+        clippy::too_many_lines,
+        reason = "异步部署轮询必须在同一边界保持任务状态机与响应校验顺序"
+    )]
+    pub(super) async fn deploy_catalog_model(
+        &self,
+        request: &InitializationRequest,
+    ) -> Result<String, ChatError> {
+        let selection = request.model.catalog_selection.as_ref().ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidParameter,
+                Operation::Initialize(PreparationStage::Deploying),
+                "目录部署缺少仓库选择".into(),
+            )
+        })?;
+        let operation = Operation::Initialize(PreparationStage::Deploying);
+        let url = self
+            .base
+            .join("/api/node/models/deployments")
+            .map_err(|error| failure(ErrorKind::InvalidParameter, operation, error.to_string()))?;
+        let response = self
+            .download_client
+            .post(url)
+            .header("Accept", "application/json")
+            .json(&AutoDeployRequest {
+                model: &selection.version.model,
+                source: &selection.version.source,
+                revision: &selection.version.revision,
+                variant_id: &request.variant.id,
+                checksum: &request.variant.expected_sha256,
+                backend: "auto",
+            })
+            .send()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| transport(error, operation))?;
+        let envelope: AutoDeployEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                format!("异步部署响应格式无效：{error}"),
+            )
+        })?;
+        if !status.is_success() || !envelope.success {
+            let reason = envelope
+                .error
+                .map(|error| error.message)
+                .unwrap_or_else(|| format!("异步部署接口返回 HTTP {status}"));
+            return Err(failure(ErrorKind::ExecutionFailed, operation, reason));
+        }
+        let mut data = envelope.data.ok_or_else(|| {
+            failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "异步部署成功响应缺少任务数据".into(),
+            )
+        })?;
+        if data.task_id.trim().is_empty() {
+            return Err(failure(
+                ErrorKind::InvalidResult,
+                operation,
+                "异步部署响应缺少任务 ID".into(),
+            ));
+        }
+        loop {
+            if data.status == "succeeded" {
+                if !data.ready_to_chat {
+                    return Err(failure(
+                        ErrorKind::ExecutionFailed,
+                        Operation::Initialize(PreparationStage::HealthChecking),
+                        "部署任务已结束但模型当前不可对话".into(),
+                    ));
+                }
+                return data
+                    .deployment
+                    .map(|deployment| deployment.model_id)
+                    .filter(|model_id| !model_id.trim().is_empty())
+                    .ok_or_else(|| {
+                        failure(
+                            ErrorKind::InvalidResult,
+                            Operation::Initialize(PreparationStage::Reporting),
+                            "部署成功响应缺少真实路由模型 ID".into(),
+                        )
+                    });
+            }
+            if matches!(data.status.as_str(), "failed" | "cancelled" | "interrupted") {
+                let reason = data
+                    .error
+                    .map(|error| error.message)
+                    .unwrap_or_else(|| format!("异步部署任务状态为 {}", data.status));
+                return Err(failure(ErrorKind::ExecutionFailed, operation, reason));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut url = self
+                .base
+                .join("/api/node/models/deployments/")
+                .map_err(|error| {
+                    failure(ErrorKind::InvalidParameter, operation, error.to_string())
+                })?;
+            url.path_segments_mut()
+                .map_err(|_| {
+                    failure(
+                        ErrorKind::InvalidParameter,
+                        operation,
+                        "部署任务 URL 无效".into(),
+                    )
+                })?
+                .pop_if_empty()
+                .push(&data.task_id);
+            let response = self
+                .client
+                .get(url)
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|error| transport(error, operation))?;
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|error| transport(error, operation))?;
+            let envelope: AutoDeployEnvelope = serde_json::from_slice(&body).map_err(|error| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    operation,
+                    format!("异步部署查询响应格式无效：{error}"),
+                )
+            })?;
+            if !status.is_success() || !envelope.success {
+                return Err(failure(
+                    ErrorKind::ExecutionFailed,
+                    operation,
+                    envelope
+                        .error
+                        .map(|error| error.message)
+                        .unwrap_or_else(|| format!("异步部署查询返回 HTTP {status}")),
+                ));
+            }
+            data = envelope.data.ok_or_else(|| {
+                failure(
+                    ErrorKind::InvalidResult,
+                    operation,
+                    "异步部署查询缺少任务数据".into(),
+                )
+            })?;
+        }
+    }
+
     /// 使用已校验的原始模型路径请求一次部署。
     ///
     /// # Examples
@@ -786,6 +997,7 @@ impl CatalogClient {
     }
 
     /// 查询已提交部署对应的 Router 准入状态。
+    #[allow(dead_code, reason = "保留旧控制台部署兼容测试边界")]
     pub(super) async fn deployment_route_status(
         &self,
         model_id: &str,
@@ -810,6 +1022,7 @@ impl CatalogClient {
                     "模型 ID URL 无效".into(),
                 )
             })?
+            .pop_if_empty()
             .push(model_id);
         let response = self
             .client
@@ -879,6 +1092,7 @@ impl CatalogClient {
     ///
     /// # Notes
     /// 该方法只查询状态，不会停止、重启或撤销 Node 部署；查询失败由调用方按“状态未知”处理。
+    #[allow(dead_code, reason = "保留旧控制台部署兼容测试边界")]
     pub(super) async fn poll_deployment_route_status(
         &self,
         model_id: &str,
@@ -1067,6 +1281,7 @@ impl CatalogClient {
             .and_then(|s| s.version.verified_path(&request.variant))
         {
             let prepared = PreparedModel {
+                route_model_id: None,
                 model: request.model.clone(),
                 variant: request.variant.clone(),
                 actual_sha256: request.variant.expected_sha256.clone(),
@@ -1157,6 +1372,7 @@ impl CatalogClient {
             path: local_path.clone(),
         });
         Ok(PreparedModel {
+            route_model_id: None,
             model: request.model.clone(),
             variant: request.variant.clone(),
             actual_sha256,

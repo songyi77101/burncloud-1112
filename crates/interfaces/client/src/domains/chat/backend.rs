@@ -2,6 +2,7 @@
 
 use super::{
     catalog::{CatalogClient, CatalogSelection},
+    inference::generate_via_router,
     model::{
         valid_digest, ChatError, ChatModel, ErrorKind, GenerationEvent, GenerationRequest, Gpu,
         Hardware, HardwareEvent, InferenceMetrics, InitializationRequest, MessageRole,
@@ -117,10 +118,27 @@ pub(super) trait ChatBackend {
     }
     /// 传入实际用户/助手历史及推理强度；流式回调正文和思考，指标可缺省。
     /// 部署后查询 Router 准入状态；默认替身只报告部署完成，不伪造本机路由状态。
+    #[allow(dead_code, reason = "保留旧部署测试替身，目录页面已迁移到异步部署任务")]
+    #[allow(
+        dead_code,
+        reason = "保留旧控制台部署兼容边界，目录页面已迁移到异步部署任务"
+    )]
     fn deploy_model_with_route(&self, model_path: String) -> BackendFuture<Option<String>> {
         let future = self.deploy_model(model_path);
         Box::pin(async move { future.await.map(|()| None) })
     }
+    /// 通过服务端异步部署目录模型，并返回真实部署凭据。
+    fn deploy_catalog_model(
+        &self,
+        request: InitializationRequest,
+        prepared: PreparedModel,
+    ) -> BackendFuture<PreparedModel> {
+        let _ = request;
+        let model_path = prepared.local_path.clone();
+        let deployment = self.deploy_model_with_route(model_path);
+        Box::pin(async move { deployment.await.map(|_| prepared) })
+    }
+
     fn generate(
         &self,
         request: GenerationRequest,
@@ -236,6 +254,7 @@ async fn pause() {
 pub(super) struct HttpBackend {
     local: LocalBackend,
     hardware_client: Result<CatalogClient, ChatError>,
+    api_token: Option<String>,
 }
 
 impl Default for HttpBackend {
@@ -248,6 +267,7 @@ impl Default for HttpBackend {
         Self {
             local: LocalBackend,
             hardware_client,
+            api_token: api_token_from_environment(),
         }
     }
 }
@@ -361,15 +381,88 @@ impl ChatBackend for HttpBackend {
             }
         })
     }
+    fn deploy_catalog_model(
+        &self,
+        request: InitializationRequest,
+        prepared: PreparedModel,
+    ) -> BackendFuture<PreparedModel> {
+        let hardware_client = self.hardware_client.clone();
+        Box::pin(async move {
+            let client = hardware_client.map_err(|error| ChatError {
+                kind: error.kind,
+                operation: Operation::Initialize(PreparationStage::Deploying),
+                reason: error.reason,
+            })?;
+            let route_model_id = client.deploy_catalog_model(&request).await?;
+            let inferred_model_id = std::path::Path::new(&prepared.local_path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .ok_or_else(|| ChatError {
+                    kind: ErrorKind::InvalidResult,
+                    operation: Operation::Initialize(PreparationStage::Reporting),
+                    reason: "下载结果没有可核对的模型标识".into(),
+                })?;
+            if inferred_model_id.trim().is_empty() {
+                return Err(ChatError {
+                    kind: ErrorKind::InvalidResult,
+                    operation: Operation::Initialize(PreparationStage::Reporting),
+                    reason: "下载结果没有可核对的模型标识".into(),
+                });
+            }
+            let mut prepared = prepared;
+            prepared.route_model_id = Some(route_model_id);
+            Ok(prepared)
+        })
+    }
+
     fn generate(
         &self,
         request: GenerationRequest,
         callback: Callback<GenerationEvent>,
     ) -> BackendFuture<Option<InferenceMetrics>> {
-        self.local.generate(request, callback)
+        if request.prepared.model.catalog_selection.is_none() {
+            return self.local.generate(request, callback);
+        }
+        let hardware_client = self.hardware_client.clone();
+        let api_token = self.api_token.clone();
+        Box::pin(async move {
+            let client = hardware_client.map_err(|error| ChatError {
+                kind: error.kind,
+                operation: Operation::Generate,
+                reason: error.reason,
+            })?;
+            let token = api_token.ok_or_else(|| {
+                error(
+                    ErrorKind::NotConnected,
+                    Operation::Generate,
+                    "未配置 BurnCloud 数据面 Token，请设置 BURNCLOUD_API_TOKEN",
+                )
+            })?;
+            generate_via_router(&client, request, &token, callback).await
+        })
     }
 }
 
+fn api_token_from_environment() -> Option<String> {
+    if let Some(value) = std::env::var("BURNCLOUD_API_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value);
+    }
+
+    let configured = std::env::var("BURNCLOUD_SERVER_URL").ok();
+    let local_server = match configured.as_deref() {
+        None => true,
+        Some(value) => reqwest::Url::parse(value)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1")),
+    };
+    local_server.then(|| "sk-burncloud-demo".to_string())
+}
 fn emit_hardware_events(callback: &mut Callback<HardwareEvent>, hardware: &Hardware) {
     for event in [
         HardwareEvent::Cpu(hardware.cpu.clone().unwrap_or_default()),
@@ -413,6 +506,7 @@ impl ChatBackend for LocalBackend {
             }
             let variant = model.variants[0].clone();
             Ok(vec![PreparedModel {
+                route_model_id: None,
                 local_path: example_path(current_platform(), &model.id, &variant.id),
                 model,
                 variant,
@@ -480,6 +574,7 @@ impl ChatBackend for LocalBackend {
             }
             callback(PreparationEvent::Downloaded);
             let result = PreparedModel {
+                route_model_id: None,
                 local_path: example_path(
                     current_platform(),
                     &request.model.id,

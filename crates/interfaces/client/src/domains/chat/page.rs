@@ -845,27 +845,23 @@ fn spawn_preparation(mut state: Signal<ChatState>, run_id: u64) {
                 let callback =
                     move |event| state.with_mut(|value| value.preparation_event(run_id, event));
                 let is_catalog = request.model.catalog_selection.is_some();
-                let result = backend.initialize(request, Box::new(callback)).await;
+                let result = backend
+                    .initialize(request.clone(), Box::new(callback))
+                    .await;
                 let plan = match result {
                     Ok(prepared) if is_catalog => {
                         if state.with_mut(|value| value.begin_catalog_deployment(run_id, &prepared))
                         {
-                            let (result, route_status) = match backend
-                                .deploy_model_with_route(prepared.local_path.clone())
-                                .await
-                            {
-                                Ok(route_status) => (Ok(()), route_status),
-                                Err(error) => (Err(error), None),
-                            };
-                            let plan = state.with_mut(|value| {
-                                value.finish_catalog_deployment(run_id, prepared, result)
-                            });
-                            if let Some(route_status) = route_status {
-                                state.with_mut(|value| {
-                                    value.set_deployment_route_status(run_id, route_status)
-                                });
-                            }
-                            plan
+                            let result = backend
+                                .deploy_catalog_model(request.clone(), prepared.clone())
+                                .await;
+                            state.with_mut(|value| {
+                                value.finish_catalog_deployment(
+                                    run_id,
+                                    prepared,
+                                    result.map(|_| ()),
+                                )
+                            })
                         } else {
                             None
                         }

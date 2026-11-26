@@ -80,6 +80,28 @@ impl LocalRouteManager {
         })
     }
 
+    /// 激活本机路由管理会话并完成旧挂载清理。
+    ///
+    /// `start_server` 在开始接受 HTTP 请求前调用此方法，确保动态 Node 部署不会与
+    /// 管理器尚未激活或旧挂载尚未摘除的启动窗口竞争。方法可重复调用；同一管理会话的
+    /// 重复调用不会创建第二个管理器，也不会收养旧挂载。
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # async fn example(db: std::sync::Arc<burncloud_database::Database>) -> Result<(), burncloud_router::local_attachment::LocalRouteAttachmentError> {
+    /// use burncloud_router::local_attachment::LocalRouteManager;
+    /// let manager = LocalRouteManager::new(db, vec![])?;
+    /// manager.initialize().await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Notes
+    /// 本方法只准备管理会话，不启动持续探测循环；持续探测仍由 [`Self::run`] 持有。
+    pub async fn initialize(&self) -> Result<(), LocalRouteAttachmentError> {
+        self.local.activate_manager(self.epoch)?;
+        self.reconcile_persisted_attachments().await
+    }
+
     /// 激活会话并并发执行每项首检；持续等待直到调用方取消此 future。
     ///
     /// # Examples
@@ -104,8 +126,7 @@ impl LocalRouteManager {
     /// 取消时不自动 detach；新的 `run` 会话启动时先隔离并摘除数据库残留，再按当前
     /// 启动清单重新探测。低层 `create_app` 不隐式启动本管理器。
     pub async fn run(self) -> Result<(), LocalRouteAttachmentError> {
-        self.local.activate_manager(self.epoch)?;
-        self.reconcile_persisted_attachments().await?;
+        self.initialize().await?;
         let mut pending: FuturesUnordered<_> = self
             .attachments
             .iter()

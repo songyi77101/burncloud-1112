@@ -1061,6 +1061,7 @@ impl ChatState {
     }
 
     /// 更新当前目录部署的 Router 准入状态；状态查询失败不改变已就绪结果。
+    #[allow(dead_code, reason = "旧部署路由状态兼容测试仍覆盖该状态边界")]
     pub(super) fn set_deployment_route_status(&mut self, run_id: u64, route_status: String) {
         let Some(preparation) = self.preparation_mut() else {
             return;
