@@ -30,6 +30,7 @@ mod hardware;
 // 声明 log 子模块（公开）：日志相关路由
 pub mod log;
 mod model_deployments;
+pub(crate) use model_deployments::recover_incomplete_deployments;
 mod model_download;
 pub(crate) mod model_resolution;
 // 声明 monitor 子模块（公开）：监控相关路由

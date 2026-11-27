@@ -14,6 +14,7 @@ categories = ["web-programming"]
 [dependencies]
 async-trait.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -41,8 +42,13 @@ jsonwebtoken = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 chrono = { workspace = true }
 dirs = { workspace = true }
+fs2.workspace = true
+sqlx.workspace = true
 sha2.workspace = true
 futures-util.workspace = true
+zip.workspace = true
+flate2 = "1.1"
+tar = "0.4"
 
 [dev-dependencies]
 async-trait.workspace = true

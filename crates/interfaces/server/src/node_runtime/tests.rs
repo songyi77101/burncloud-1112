@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use burncloud_node_runtime::{
     deployment::{DeploymentEventPublisher, DeploymentService, HttpProbe, LocalProcessManager},
     ArtifactVerificationStatus, HealthProbe, NodeState, PreparedArtifact, PreparedRuntime,
-    ProcessManager, ReadinessProbe, RuntimeAdapter,
+    ProcessManager, ReadinessProbe, RuntimeAdapter, RuntimePreparer, RuntimeRequest,
 };
 use serde_json::json;
 use std::{
@@ -17,77 +17,84 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
-use tokio::time::sleep;
+use tokio::{process::Command, time::sleep};
 
 use super::LlamaCppRuntimeAdapter;
 
+#[tokio::test]
+#[ignore = "需要真实 Gitee Release 网络和独立运行时缓存目录"]
+async fn live_gitee_runtime_preparer_downloads_extracts_probes_and_commits_cache() {
+    let preparer = super::LlamaCppRuntimePreparer;
+    let prepared = preparer
+        .prepare(RuntimeRequest {
+            runtime: "llama.cpp".to_string(),
+            version: None,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("Gitee 运行时准备失败: {error}"));
+    let executable = PathBuf::from(&prepared.executable);
+    assert!(executable.is_file(), "运行时可执行文件应存在");
+
+    let version = Command::new(&executable)
+        .arg("--version")
+        .output()
+        .await
+        .unwrap_or_else(|error| panic!("llama-server --version 启动失败: {error}"));
+    assert!(version.status.success(), "llama-server --version 应成功");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(output.contains("12757"), "运行时版本输出不匹配: {output}");
+    let cached = preparer
+        .prepare(RuntimeRequest {
+            runtime: "llama.cpp".to_string(),
+            version: None,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("复用已安装 Gitee 运行时失败: {error}"));
+    assert_eq!(cached.executable, prepared.executable);
+    println!("runtime_cache_reuse=verified");
+    println!("runtime_executable={}", executable.display());
+    println!("runtime_version={}", output.trim());
+}
 #[test]
-fn runtime_resolution_finds_the_portable_runtime_without_environment_configuration() {
-    let directory = tempfile::tempdir().unwrap();
-    let app = directory.path().join("burncloud.exe");
-    fs::write(&app, b"app").unwrap();
-    let bundled = directory
-        .path()
-        .join("runtime")
-        .join("bin")
-        .join(if cfg!(windows) {
-            "llama-server.exe"
-        } else {
-            "llama-server"
-        });
-    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
-    fs::write(&bundled, b"runtime").unwrap();
+fn runtime_preparer_advertises_the_supported_llama_cpp_runtime() {
+    let preparer = super::LlamaCppRuntimePreparer;
 
-    let resolved = super::resolve_llama_server(None, &app).unwrap();
-
-    assert_eq!(resolved, bundled);
+    assert_eq!(preparer.supported_runtimes(), vec!["llama.cpp"]);
 }
 
 #[test]
-fn runtime_resolution_keeps_explicit_configuration_precedence() {
+fn explicit_runtime_path_accepts_only_absolute_regular_files() {
     let directory = tempfile::tempdir().unwrap();
-    let app = directory.path().join("burncloud.exe");
-    fs::write(&app, b"app").unwrap();
-    let bundled = directory
-        .path()
-        .join("runtime")
-        .join("bin")
-        .join(if cfg!(windows) {
-            "llama-server.exe"
-        } else {
-            "llama-server"
-        });
-    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
-    fs::write(&bundled, b"runtime").unwrap();
-    let configured = directory.path().join("custom-llama-server");
-    fs::write(&configured, b"custom runtime").unwrap();
+    let executable = directory.path().join("custom-llama-server");
+    fs::write(&executable, b"runtime").unwrap();
 
-    let resolved = super::resolve_llama_server(Some(configured.clone()), &app).unwrap();
+    let resolved = super::explicit_runtime_executable(Some(executable.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved, executable);
 
-    assert_eq!(resolved, configured);
+    let relative =
+        super::explicit_runtime_executable(Some(PathBuf::from("llama-server"))).unwrap_err();
+    assert_eq!(relative.code, "runtime_configuration_invalid");
 }
 
 #[test]
-fn runtime_resolution_does_not_fall_back_when_explicit_configuration_is_invalid() {
+fn invalid_explicit_runtime_path_fails_closed_instead_of_falling_back() {
     let directory = tempfile::tempdir().unwrap();
-    let app = directory.path().join("burncloud.exe");
-    fs::write(&app, b"app").unwrap();
-    let bundled = directory
-        .path()
-        .join("runtime")
-        .join("bin")
-        .join(if cfg!(windows) {
-            "llama-server.exe"
-        } else {
-            "llama-server"
-        });
-    fs::create_dir_all(bundled.parent().unwrap()).unwrap();
-    fs::write(&bundled, b"runtime").unwrap();
-    let missing = PathBuf::from(directory.path()).join("missing-llama-server");
+    let missing = directory.path().join("missing-llama-server");
 
-    let error = super::resolve_llama_server(Some(missing.clone()), &app).unwrap_err();
+    let error = super::explicit_runtime_executable(Some(missing)).unwrap_err();
 
-    assert!(error.contains(&missing.display().to_string()));
+    assert_eq!(error.code, "runtime_configuration_invalid");
+}
+
+#[test]
+fn absent_explicit_runtime_path_allows_managed_cache_resolution() {
+    assert!(super::explicit_runtime_executable(None).unwrap().is_none());
 }
 
 #[tokio::test]

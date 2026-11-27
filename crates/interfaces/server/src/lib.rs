@@ -4,6 +4,7 @@ pub mod api;
 // 声明 logging 子模块（公开）：日志相关
 pub mod logging;
 // 本地路由配置与启动生命周期管理保持私有，避免绕过服务启动校验。
+mod deployment_lifecycle;
 mod local_routes;
 #[allow(
     dead_code,
@@ -87,6 +88,7 @@ use std::fmt;
 use std::net::SocketAddr;
 // 引入 Arc（共享所有权）
 use std::sync::Arc;
+use uuid::Uuid;
 // 引入 tokio 的 mpsc、oneshot 通道与 OnceCell
 use tokio::sync::{mpsc, oneshot, OnceCell};
 // 引入 CORS 中间件
@@ -179,6 +181,10 @@ pub struct AppState {
     pub data_plane: Router,
     // 节点部署状态（crate 内可见）
     pub(crate) node_deployment: Arc<node_deployment::NodeDeploymentState>,
+    // 部署任务共享此应用会话，服务重启恢复据此识别遗留任务。
+    pub(crate) deployment_session_id: Uuid,
+    // 后台 worker 克隆 AppState 时继续持有此锁，防止服务退出结算期间第二实例接管。
+    _deployment_owner_lock: Option<Arc<deployment_lifecycle::ServerOwnerLock>>,
 }
 
 /// 构建统一网关，将模型选择接口、管理 API 和可选 LiveView 挂到同一服务。
@@ -206,13 +212,14 @@ pub async fn create_app(
     jwt_secret: JwtSecret,
     internal_secret: InternalSecret,
 ) -> anyhow::Result<Router> {
-    // 委托给带自定义 NodeRequestState 的版本
-    create_app_with_node_request_state(
+    create_app_for_session(
         db,
         enable_liveview,
         jwt_secret,
         internal_secret,
         node_request::NodeRequestState::default(),
+        Uuid::new_v4(),
+        None,
     )
     .await
 }
@@ -225,6 +232,32 @@ pub async fn create_app_with_node_request_state(
     jwt_secret: JwtSecret,
     internal_secret: InternalSecret,
     node_request_state: node_request::NodeRequestState,
+) -> anyhow::Result<Router> {
+    create_app_for_session(
+        db,
+        enable_liveview,
+        jwt_secret,
+        internal_secret,
+        node_request_state,
+        Uuid::new_v4(),
+        None,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "应用组合根需要把固定会话与服务所有者锁注入同一 AppState，公开创建接口保持兼容"
+)]
+#[tracing::instrument(skip(db, node_request_state, owner_lock))]
+async fn create_app_for_session(
+    db: Arc<Database>,
+    enable_liveview: bool,
+    jwt_secret: JwtSecret,
+    internal_secret: InternalSecret,
+    node_request_state: node_request::NodeRequestState,
+    deployment_session_id: Uuid,
+    owner_lock: Option<Arc<deployment_lifecycle::ServerOwnerLock>>,
 ) -> anyhow::Result<Router> {
     // 创建系统监控服务
     let monitor = Arc::new(SystemMonitorService::new());
@@ -299,6 +332,8 @@ pub async fn create_app_with_node_request_state(
         force_sync_tx,
         data_plane: router_app.clone(),
         node_deployment,
+        deployment_session_id,
+        _deployment_owner_lock: owner_lock,
     };
 
     // 1. Management API Router
@@ -412,6 +447,10 @@ pub async fn start_server(host: &str, port: u16, enable_liveview: bool) -> anyho
     // 校验内部密钥
     let internal_secret = InternalSecret::new(internal_secret)?;
 
+    // 在数据库初始化和旧任务恢复前取得进程锁，避免两个服务实例互相恢复任务。
+    let owner_lock = Arc::new(deployment_lifecycle::ServerOwnerLock::acquire_current_database()?);
+    let deployment_session_id = Uuid::new_v4();
+
     // 创建默认数据库连接
     let db = create_default_database().await?;
     // 初始化路由数据库 schema
@@ -430,9 +469,23 @@ pub async fn start_server(host: &str, port: u16, enable_liveview: bool) -> anyho
     // 包成 Arc
     let db = Arc::new(db);
 
+    // 只有持有数据库所有者锁时才恢复旧会话；恢复失败则拒绝启动并保留可诊断状态。
+    api::recover_incomplete_deployments(db.clone(), deployment_session_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
+
     // 管理器和 HTTP 服务由同一个 select 生命周期持有，确保取消时关闭本地挂载准入。
     let manager = LocalRouteManager::new(db.clone(), attachments)?;
-    let app = create_app(db, enable_liveview, jwt_secret, internal_secret).await?;
+    let app = create_app_for_session(
+        db,
+        enable_liveview,
+        jwt_secret,
+        internal_secret,
+        node_request::NodeRequestState::default(),
+        deployment_session_id,
+        Some(owner_lock.clone()),
+    )
+    .await?;
     // 先完成管理会话激活和旧挂载清理，再绑定 HTTP 监听器，避免首个动态部署
     // 与本机路由管理器的启动窗口竞争而得到不可重试的准入失败。
     manager.initialize().await?;

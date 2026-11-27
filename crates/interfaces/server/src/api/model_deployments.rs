@@ -30,6 +30,22 @@ use crate::{
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const LOCAL_OWNER_ID: Uuid = Uuid::from_u128(1);
 
+/// 恢复服务上次会话遗留的部署任务。
+pub(crate) async fn recover_incomplete_deployments(
+    db: std::sync::Arc<burncloud_database::Database>,
+    session_id: Uuid,
+) -> Result<(), String> {
+    let store = DeploymentStore::new(db);
+    let interrupted = store
+        .interrupt_incomplete(LOCAL_OWNER_ID, session_id)
+        .await
+        .map_err(|error| error.message)?;
+    if !interrupted.is_empty() {
+        tracing::warn!(count = interrupted.len(), "服务重启后中断未完成部署任务");
+    }
+    Ok(())
+}
+
 /// 构建本机模型异步部署路由。
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -161,10 +177,12 @@ async fn submit_deployment(State(state): State<AppState>, body: Bytes) -> Respon
             )
         }
     };
+    if let Some((code, message)) = unsupported_backend_preflight(command.backend) {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, code, message);
+    }
     let store = DeploymentStore::new(state.db.clone());
-    let session = Uuid::new_v4();
     let (task, reused) = match store
-        .insert_or_join(LOCAL_OWNER_ID, session, &command)
+        .insert_or_join(LOCAL_OWNER_ID, state.deployment_session_id, &command)
         .await
     {
         Ok(result) => result,
@@ -332,6 +350,62 @@ fn default_backend() -> String {
     "auto".to_string()
 }
 
+fn runtime_failure_details(error: &str) -> Option<(&'static str, &'static str)> {
+    let details = error.strip_prefix("runtime preparation failed: ")?;
+    let (code, _) = details.split_once(": ")?;
+    match code {
+        "unsupported_platform" => Some((
+            "unsupported_platform",
+            "当前平台没有受支持的 llama.cpp 运行时",
+        )),
+        "unsupported_backend" => Some((
+            "unsupported_backend",
+            "当前固定运行时来源不支持请求的 backend",
+        )),
+        "runtime_configuration_invalid" => Some((
+            "runtime_configuration_invalid",
+            "运行时请求或服务端配置无效",
+        )),
+        "runtime_manifest_invalid" => {
+            Some(("runtime_manifest_invalid", "服务端固定运行时清单无效"))
+        }
+        "runtime_cache_invalid" => Some(("runtime_cache_invalid", "运行时缓存不可用")),
+        "runtime_download_failed" => Some(("runtime_download_failed", "运行时归档下载失败")),
+        "runtime_source_unavailable" => {
+            Some(("runtime_source_unavailable", "固定 Gitee 运行时资源不可用"))
+        }
+        "runtime_size_mismatch" => Some(("runtime_size_mismatch", "运行时归档长度校验失败")),
+        "runtime_checksum_mismatch" => {
+            Some(("runtime_checksum_mismatch", "运行时归档 SHA-256 校验失败"))
+        }
+        "runtime_archive_invalid" => {
+            Some(("runtime_archive_invalid", "运行时归档不满足安全解压要求"))
+        }
+        "runtime_archive_io" => Some(("runtime_archive_io", "运行时归档处理失败")),
+        "runtime_probe_failed" => Some(("runtime_probe_failed", "llama-server 运行时探测失败")),
+        "runtime_device_unavailable" => {
+            Some(("runtime_device_unavailable", "请求的运行时设备不可用"))
+        }
+        "runtime_install_interrupted" => {
+            Some(("runtime_install_interrupted", "运行时准备作业已中断"))
+        }
+        "cancelled" => Some(("cancelled", "运行时准备已取消")),
+        _ => None,
+    }
+}
+
+fn unsupported_backend_preflight(
+    backend: RequestedBackend,
+) -> Option<(&'static str, &'static str)> {
+    match backend {
+        RequestedBackend::Cuda => Some((
+            "unsupported_backend",
+            "当前固定 Gitee 运行时来源没有 CUDA 资源",
+        )),
+        RequestedBackend::Auto | RequestedBackend::Cpu => None,
+    }
+}
+
 fn validate_request(request: SubmitRequest) -> Result<DeploymentCommand, &'static str> {
     let source = ModelSource::parse(request.source.trim()).ok_or("模型来源不受支持")?;
     let backend = RequestedBackend::parse(request.backend.trim()).ok_or("部署后端不受支持")?;
@@ -359,8 +433,21 @@ fn validate_request(request: SubmitRequest) -> Result<DeploymentCommand, &'stati
 fn spawn_deployment_worker(state: AppState, task: DeploymentTask) {
     tokio::spawn(async move {
         let store = DeploymentStore::new(state.db.clone());
-        if let Err(error) = run_deployment(&state, &store, task).await {
-            tracing::error!(%error, "本机部署后台任务失败");
+        if let Err(error) = run_deployment(&state, &store, task.clone()).await {
+            tracing::error!(%error, task_id = %task.task_id, "本机部署后台任务失败");
+            let (code, message) = runtime_failure_details(&error).unwrap_or((
+                "deployment_failed",
+                "自动部署执行失败，请检查服务日志后重试",
+            ));
+            if let Err(finalize_error) =
+                finalize_unhandled_failure(&store, task.task_id, code, message).await
+            {
+                tracing::error!(
+                    %finalize_error,
+                    task_id = %task.task_id,
+                    "本机部署失败后未能持久化终态"
+                );
+            }
         }
     });
 }
@@ -444,8 +531,7 @@ async fn run_deployment(
     verified.model_download.actual_sha256 = Some(actual);
     verified.model_download.detail = Some("模型文件已下载并完成校验".to_string());
     verified.stage = DeploymentStage::Starting;
-    verified.updated_at = now();
-    verified.row_version += 1;
+    mark_runtime_preparing(&mut verified);
     current = store
         .compare_update(&current, &verified)
         .await
@@ -458,14 +544,11 @@ async fn run_deployment(
     let snapshot = match state.node_deployment.start_local(path).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            return fail_task(
-                store,
-                &current,
-                "process_start_failed",
-                "模型运行时启动失败",
-            )
-            .await
-            .map_err(|_| error)
+            let (code, message) = runtime_failure_details(&error)
+                .unwrap_or(("process_start_failed", "模型运行时启动失败"));
+            return fail_task(store, &current, code, message)
+                .await
+                .map_err(|_| error);
         }
     };
     let Some(current) = store
@@ -596,6 +679,36 @@ async fn stop_runtime(state: &AppState, model_id: &str) -> Option<TaskError> {
     }
 }
 
+fn mark_runtime_preparing(task: &mut DeploymentTask) {
+    task.runtime.status = TaskStatus::Running;
+    task.runtime.stage = Some(DeploymentStage::PreparingRuntime);
+    task.runtime.detail = Some("正在准备 llama.cpp 运行时".to_string());
+    task.updated_at = now();
+    task.row_version += 1;
+}
+
+async fn finalize_unhandled_failure(
+    store: &DeploymentStore,
+    task_id: Uuid,
+    code: &str,
+    message: &str,
+) -> Result<(), String> {
+    let Some(current) = store
+        .load(LOCAL_OWNER_ID, task_id)
+        .await
+        .map_err(|error| error.message.clone())?
+    else {
+        return Err("部署任务不存在，无法收束后台错误".to_string());
+    };
+    if current.status.is_terminal() {
+        return Ok(());
+    }
+    if current.cancel_requested {
+        return cancel_task(store, &current).await;
+    }
+    fail_task(store, &current, code, message).await
+}
+
 async fn fail_task(
     store: &DeploymentStore,
     current: &DeploymentTask,
@@ -618,6 +731,28 @@ async fn fail_task_with_cleanup(
         code: code.to_string(),
         message: message.to_string(),
     });
+    if !failed.model_download.status.is_terminal() {
+        failed.model_download.status = TaskStatus::Failed;
+        if failed.model_download.stage.is_none() {
+            failed.model_download.stage = Some(DeploymentStage::DownloadingModel);
+        }
+        failed.model_download.detail = Some(message.to_string());
+        failed.model_download.error = Some(TaskError {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
+    }
+    if !failed.runtime.status.is_terminal() {
+        failed.runtime.status = TaskStatus::Failed;
+        if failed.runtime.stage.is_none() {
+            failed.runtime.stage = Some(DeploymentStage::PreparingRuntime);
+        }
+        failed.runtime.detail = Some(message.to_string());
+        failed.runtime.error = Some(TaskError {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
+    }
     failed.cleanup_error = cleanup_error;
     failed.finished_at = Some(now());
     failed.updated_at = failed.finished_at.clone().unwrap_or_else(now);
