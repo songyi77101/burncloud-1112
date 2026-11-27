@@ -284,7 +284,12 @@ async fn cancelling_a_running_probe_terminates_and_waits_for_the_child() {
     let cancellation = CancellationToken::new();
     let child_cancellation = cancellation.clone();
     let probe = tokio::spawn(async move {
-        run_probe_process(&executable, "--version", &child_cancellation).await
+        Box::pin(run_probe_process(
+            &executable,
+            "--version",
+            &child_cancellation,
+        ))
+        .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     cancellation.cancel();
