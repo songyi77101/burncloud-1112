@@ -16,6 +16,8 @@ use tempfile::NamedTempFile;
 mod archive;
 #[allow(dead_code, reason = "任务 031 将缓存组件接入运行时准备器")]
 mod cache;
+#[allow(dead_code, reason = "任务 031 将探测器接入运行时准备器")]
+mod probe;
 
 #[derive(Debug, Default)]
 pub(crate) struct LlamaCppRuntimePreparer;

@@ -14,6 +14,7 @@ categories = ["web-programming"]
 [dependencies]
 async-trait.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
