@@ -4,7 +4,7 @@
 
 ## 运行时归档下载
 
-- `download_runtime_archive` 只接受服务端 manifest 中四个已登记目标的固定归档身份，并根据代码固定的仓库与 commit 生成 Gitee raw 地址；调用方不能提交 URL、commit 或重定向目标。
+- `download_runtime_archive` 只接受服务端 manifest 中四个已登记目标的固定归档身份，并使用固定 Release 标签 `b12757` 生成 Gitee 附件地址；调用方不能提交 URL、commit 或重定向目标。HTTP 重定向只允许 HTTPS Gitee 附件主机上的匹配文件路径，并限制为两跳。
 - 下载器使用 `reqwest` response stream 将内容写入运行时下载目录的 `.part` 文件，不启动 aria2，也不把整个压缩包载入内存。
 - 断点 sidecar 只记录固定资源身份、强 ETag 和已同步的连续字节数。只有 Range 起点、Content-Range、实体 ETag、总长度和本地前缀一致时才续传；不一致时先清理旧实体，再从头下载。
 - 取消或连接中断时，带强 ETag 的有效连续前缀会同步后保留；无强 ETag 时不保留可恢复断点。下载完成还会重新校验 manifest 字节数和完整 SHA-256，校验通过前不会提升为已验证归档。

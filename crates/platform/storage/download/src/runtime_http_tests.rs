@@ -25,6 +25,147 @@ fn fixed_manifest_identity_accepts_four_targets_only() {
 }
 
 #[test]
+fn release_download_url_uses_the_fixed_gitee_release_tag() {
+    let archive = RuntimeArchive::new(
+        "x86_64-pc-windows-msvc",
+        "llama-b12757-bin-win-cpu-x64.zip",
+        1,
+        "a".repeat(64),
+    )
+    .unwrap();
+
+    assert_eq!(
+        archive.url().unwrap().as_str(),
+        "https://gitee.com/songyi777/llama-cpp/releases/download/b12757/llama-b12757-bin-win-cpu-x64.zip"
+    );
+}
+
+#[test]
+fn runtime_redirect_policy_stops_before_following_a_third_redirect() {
+    assert!(!runtime_redirect_limit_reached(0));
+    assert!(!runtime_redirect_limit_reached(1));
+    assert!(!runtime_redirect_limit_reached(2));
+    assert!(runtime_redirect_limit_reached(MAX_RUNTIME_REDIRECTS + 1));
+}
+
+#[test]
+fn release_redirect_allowlist_accepts_only_secure_gitee_attachment_urls() {
+    let filename = "llama-b12757-bin-win-cpu-x64.zip";
+    let allowed = [
+        "https://gitee.com/songyi777/llama-cpp/attach_files/3850728/download/llama-b12757-bin-win-cpu-x64.zip?signature=redacted",
+        "https://foruda.gitee.com/attach_file/1795748766413673453/llama-b12757-bin-win-cpu-x64.zip?signature=redacted",
+    ];
+    for value in allowed {
+        let url = Url::parse(value).unwrap();
+        assert!(is_allowed_attachment_url(&url, filename), "{value}");
+    }
+
+    let rejected = [
+        "http://gitee.com/songyi777/llama-cpp/attach_files/3850728/download/llama-b12757-bin-win-cpu-x64.zip",
+        "https://gitee.com.attacker.invalid/songyi777/llama-cpp/attach_files/3850728/download/llama-b12757-bin-win-cpu-x64.zip",
+        "https://foruda.gitee.com.attacker.invalid/attach_file/1795748766413673453/llama-b12757-bin-win-cpu-x64.zip",
+        "https://gitee.com/songyi777/llama-cpp/attach_files/not-a-number/download/llama-b12757-bin-win-cpu-x64.zip",
+        "https://foruda.gitee.com/attach_file/1795748766413673453/other.zip",
+        "https://gitee.com:8443/songyi777/llama-cpp/attach_files/3850728/download/llama-b12757-bin-win-cpu-x64.zip",
+    ];
+    for value in rejected {
+        let url = Url::parse(value).unwrap();
+        assert!(!is_allowed_attachment_url(&url, filename), "{value}");
+    }
+}
+
+#[test]
+fn response_url_accepts_only_the_archive_release_attachment_redirect() {
+    let archive = RuntimeArchive::new(
+        "x86_64-pc-windows-msvc",
+        "llama-b12757-bin-win-cpu-x64.zip",
+        1,
+        "a".repeat(64),
+    )
+    .unwrap();
+    let release_url = archive.url().unwrap();
+    let final_url = Url::parse("https://foruda.gitee.com/attach_file/123/llama-b12757-bin-win-cpu-x64.zip?signature=redacted").unwrap();
+    let wrong_file = Url::parse("https://foruda.gitee.com/attach_file/123/other.zip").unwrap();
+
+    assert!(response_url_matches_archive(
+        &archive,
+        &release_url,
+        &release_url
+    ));
+    assert!(response_url_matches_archive(
+        &archive,
+        &release_url,
+        &final_url
+    ));
+    assert!(!response_url_matches_archive(
+        &archive,
+        &release_url,
+        &wrong_file
+    ));
+    assert!(!response_url_matches_archive(
+        &archive,
+        &wrong_file,
+        &final_url
+    ));
+}
+
+#[tokio::test]
+#[ignore = "需要真实访问 Gitee Release 网络资源"]
+async fn gitee_release_artifacts_download_and_match_manifest_hashes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let targets = [
+        (
+            "x86_64-pc-windows-msvc",
+            "llama-b12757-bin-win-cpu-x64.zip",
+            25_262_139,
+            "5482ac02398d674107b56b3b201485b15c9ee60c3b996f864c04f5367ece0c8d",
+        ),
+        (
+            "aarch64-apple-darwin",
+            "llama-b12757-bin-macos-arm64.tar.gz",
+            16_862_081,
+            "873b413c5d4a336ae623bedde8f755a3ed81b18bc6ae4b01f5a0f6fcea63754c",
+        ),
+        (
+            "x86_64-apple-darwin",
+            "llama-b12757-bin-macos-x64.tar.gz",
+            12_591_660,
+            "f330d7bf9baff5cc401c06524618f9eaf8962439dcb9e11fa638f8e3b0bee14b",
+        ),
+        (
+            "x86_64-unknown-linux-gnu",
+            "llama-b12757-bin-ubuntu-x64.tar.gz",
+            23_425_964,
+            "99e34cc6a39f3afda735d43d76d15d6ead2297406cc9c0cf421b771fd3a1a84a",
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let cancellation = CancellationToken::new();
+
+    for (target, filename, size_bytes, sha256) in targets {
+        let archive = RuntimeArchive::new(target, filename, size_bytes, sha256)?;
+        let (progress, _) = watch::channel(RuntimeDownloadProgress::default());
+        let verified =
+            download_runtime_archive(&archive, temp.path(), &progress, &cancellation).await?;
+        if verified.size_bytes() != size_bytes {
+            return Err(format!(
+                "{filename}: size mismatch: actual {}, expected {size_bytes}",
+                verified.size_bytes()
+            )
+            .into());
+        }
+        if verified.sha256() != sha256 {
+            return Err(format!(
+                "{filename}: SHA-256 mismatch: actual {}, expected {sha256}",
+                verified.sha256()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn strong_etag_parser_rejects_weak_and_malformed_values() {
     assert!(is_strong_etag("\"stable\""));
     assert!(!is_strong_etag("W/\"weak\""));

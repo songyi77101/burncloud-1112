@@ -27,6 +27,10 @@ pub(super) enum RequestedBackend {
 }
 
 impl RequestedBackend {
+    #[allow(
+        dead_code,
+        reason = "自动部署 backend 请求将在任务 032 接入运行时准备契约"
+    )]
     pub(super) fn parse(value: &str) -> Result<Self, RuntimeProbeError> {
         match value {
             "auto" => Ok(Self::Auto),

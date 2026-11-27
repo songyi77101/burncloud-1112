@@ -10,10 +10,10 @@
 | repository | `songyi777/llama-cpp` |
 | commit | `51d01f6e526bc6d45b9d252b1d2d487efb6625d8` |
 | version | `b12757` |
-| raw URL | `https://gitee.com/songyi777/llama-cpp/raw/<commit>/<filename>` |
+| Release URL 模板 | `https://gitee.com/songyi777/llama-cpp/releases/download/{version}/{filename}` |
 | 生产期动态发现 | 禁止；Gitee API 只用于资源登记或人工刷新 |
 
-生产下载只由服务端把固定 `commit` 与 manifest 中的文件名拼接为 raw URL。客户端不能提交版本、commit、URL、SHA-256、文件名或解压路径，也不使用 `git clone`、`contents` Base64 或 aria2。
+生产下载只使用 manifest 中固定的 Release 标签和文件名；Release 附件经 HTTPS 重定向到 Gitee 附件域名时，只允许 `gitee.com` 与 `foruda.gitee.com` 的精确附件路径及匹配文件名，最多两次重定向。客户端不能提交版本、commit、URL、SHA-256、文件名或解压路径，也不使用 `git clone`、`contents` Base64 或 aria2。
 
 ## 受管目标资源
 
@@ -62,13 +62,13 @@ manifest 是服务端配置，不是客户端可扩展的 JSON。校验失败不
 
 1. 管理员显式配置 `BURNCLOUD_LLAMA_SERVER`；
 2. 已校验的用户缓存；
-3. 固定 commit 的 Gitee raw 下载。
+3. 固定 Release 标签 `b12757` 的 Gitee 附件下载，并核对固定 commit 来源、字节数及 SHA-256。
 
 方案二继续复用自动部署的 POST/GET/DELETE 接口，运行时下载、校验、解压、探测和缓存提交作为部署任务的 `preparing_runtime` 子阶段展示；不增加 runtime 管理 HTTP API。模型 GGUF 下载、`DeploymentService` 进程生命周期、健康检查和路由绑定不由本清单改变。
 
 ## 资源登记复核
 
-资源登记或人工刷新必须对固定 commit 的实际归档执行：
+资源登记或人工刷新必须对固定 Release 附件的实际归档字节执行：
 
 ```powershell
 $file = Get-Item '.\llama-b12757-bin-win-cpu-x64.zip'
@@ -76,7 +76,7 @@ $file.Length
 Get-FileHash $file.FullName -Algorithm SHA256
 ```
 
-登记工具应比较实际长度与 `size_bytes`、比较完整 SHA-256 与 `sha256`，并在不匹配时失败；不得使用 Git blob id 代替归档 SHA-256。四个平台的真实目标机启动、依赖、许可证、Metal 设备能力和对话验收属于后续任务，未完成前不得宣称目标已支持。
+登记工具应比较实际长度与 `size_bytes`、比较完整 SHA-256 与 `sha256`，并在不匹配时失败；不得使用 Git blob id 代替归档 SHA-256。2026-11-27 已通过 reqwest 下载并核对四个 Release 附件的大小和 SHA-256；Windows x64 的 `LlamaCppRuntimePreparer` 实测走完下载、校验、解压、探测和缓存提交，生成 `ready`/`runtime.json`，第二次准备复用缓存成功；`llama-server.exe --version` 与 `--help` 均成功。本机默认缓存根为 `%LOCALAPPDATA%\BurnCloud\runtimes`。尚未完成有效 GGUF 模型加载、服务健康接口及真实对话，也未在 macOS Intel、macOS Apple Silicon、Ubuntu 目标机执行，因此这些平台仍标记为“未验收”，不得据附件下载成功宣称已支持。
 
 ## 历史方案说明
 

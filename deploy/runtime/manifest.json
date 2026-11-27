@@ -4,7 +4,7 @@
   "repository": "songyi777/llama-cpp",
   "commit": "51d01f6e526bc6d45b9d252b1d2d487efb6625d8",
   "version": "b12757",
-  "raw_url_template": "https://gitee.com/songyi777/llama-cpp/raw/{commit}/{filename}",
+  "release_url_template": "https://gitee.com/songyi777/llama-cpp/releases/download/{version}/{filename}",
   "archive_limits": {
     "max_path_bytes": 4096,
     "max_entries": 100000,

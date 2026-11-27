@@ -332,6 +332,20 @@ pub(super) fn runtime_download_paths(
     })
 }
 
+pub(super) fn quarantine_cached_runtime(
+    cache_root: &Path,
+    spec: &RuntimeCacheSpec,
+) -> Result<(), RuntimeCacheError> {
+    let cache_directory = spec.key.cache_directory(cache_root);
+    match fs::symlink_metadata(&cache_directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeCacheError::CacheInvalid(format!(
+            "无法检查待隔离的运行时缓存：{error}"
+        ))),
+        Ok(_) => quarantine_cache_entry(cache_root, &cache_directory, &spec.key),
+    }
+}
+
 pub(super) fn check_cached_runtime(
     cache_root: &Path,
     spec: &RuntimeCacheSpec,
@@ -876,6 +890,7 @@ impl RuntimeInstallStatus {
 }
 
 struct RuntimeInstallJob {
+    #[allow(dead_code, reason = "任务 032 将共享作业 ID 暴露在运行时子进度中")]
     id: Uuid,
     key: RuntimeCacheKey,
     status: watch::Sender<RuntimeInstallStatus>,
@@ -948,9 +963,11 @@ impl RuntimeInstallJob {
 pub(super) struct RuntimeInstallSubscription {
     job: Arc<RuntimeInstallJob>,
     status: watch::Receiver<RuntimeInstallStatus>,
+    #[allow(dead_code, reason = "任务 032 将共享作业进度转为父部署任务快照")]
     progress: watch::Receiver<RuntimeInstallProgress>,
 }
 
+#[allow(dead_code, reason = "任务 032 将共享作业身份和进度接入父部署任务")]
 impl RuntimeInstallSubscription {
     pub(super) fn job_id(&self) -> Uuid {
         self.job.id

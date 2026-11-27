@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 const PROVIDER: &str = "gitee";
 const REPOSITORY: &str = "songyi777/llama-cpp";
 const COMMIT: &str = "51d01f6e526bc6d45b9d252b1d2d487efb6625d8";
-const RAW_URL: &str = "https://gitee.com/songyi777/llama-cpp/raw";
+const VERSION: &str = "b12757";
+const RELEASE_URL: &str = "https://gitee.com/songyi777/llama-cpp/releases/download";
+const MAX_RUNTIME_REDIRECTS: usize = 2;
 const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 64 * 1024;
 const CHECKPOINT_INTERVAL_BYTES: u64 = 1024 * 1024;
@@ -36,8 +38,8 @@ const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// 受信任 Gitee 运行时归档的固定身份。
 ///
-/// URL 由本模块按固定仓库和 commit 生成，调用方不能传入任意下载地址。大小和 SHA-256
-/// 必须来自服务端 manifest，不得直接使用 HTTP 请求字段。
+/// URL 由本模块按固定 Gitee Release 标签和 manifest 文件名生成；来源仓库及 commit 固定登记，调用方不能传入任意下载地址。大小和 SHA-256
+/// 必须来自服务端 manifest，不得直接使用 HTTP 请求字段。Release 附件只允许经过受限 HTTPS Gitee 重定向访问。
 ///
 /// # Notes
 /// 构造器只接受四个平台的固定 target 与文件名；调用方提供的长度和摘要仍须来自可信服务端清单。
@@ -171,7 +173,7 @@ impl RuntimeArchive {
     }
 
     fn url(&self) -> Result<Url, RuntimeDownloadError> {
-        Url::parse(&format!("{RAW_URL}/{COMMIT}/{}", self.filename))
+        Url::parse(&format!("{RELEASE_URL}/{VERSION}/{}", self.filename))
             .map_err(|_| RuntimeDownloadError::InvalidArchiveIdentity)
     }
 }
@@ -428,7 +430,7 @@ async fn download_runtime_archive_at(
     let final_path = download_dir.join(&archive.filename);
     let client = Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .redirect(Policy::none())
+        .redirect(runtime_redirect_policy(archive.filename.clone()))
         .build()
         .map_err(RuntimeDownloadError::Transport)?;
     if let Some(verified) = verify_existing_archive(archive, &final_path).await? {
@@ -618,6 +620,72 @@ async fn download_full_response(
     .await
 }
 
+fn runtime_redirect_policy(filename: String) -> Policy {
+    Policy::custom(move |attempt| {
+        if runtime_redirect_limit_reached(attempt.previous().len()) {
+            attempt.error("运行时下载重定向次数超过限制")
+        } else if is_allowed_attachment_url(attempt.url(), &filename) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+fn runtime_redirect_limit_reached(previous_requests: usize) -> bool {
+    previous_requests.saturating_sub(1) >= MAX_RUNTIME_REDIRECTS
+}
+
+fn is_allowed_attachment_url(url: &Url, filename: &str) -> bool {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port_or_known_default() != Some(443)
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match host {
+        "gitee.com" => url
+            .path()
+            .strip_prefix("/songyi777/llama-cpp/attach_files/")
+            .and_then(|path| path.split_once("/download/"))
+            .is_some_and(|(attachment_id, name)| {
+                !attachment_id.is_empty()
+                    && attachment_id.bytes().all(|byte| byte.is_ascii_digit())
+                    && name == filename
+            }),
+        "foruda.gitee.com" => url
+            .path()
+            .strip_prefix("/attach_file/")
+            .and_then(|path| path.split_once('/'))
+            .is_some_and(|(attachment_id, name)| {
+                !attachment_id.is_empty()
+                    && attachment_id.bytes().all(|byte| byte.is_ascii_digit())
+                    && name == filename
+            }),
+        _ => false,
+    }
+}
+
+fn response_url_matches_archive(
+    archive: &RuntimeArchive,
+    request_url: &Url,
+    response_url: &Url,
+) -> bool {
+    if response_url == request_url {
+        return true;
+    }
+    let Ok(expected_url) = archive.url() else {
+        return false;
+    };
+    request_url == &expected_url && is_allowed_attachment_url(response_url, &archive.filename)
+}
+
 async fn send_request(
     request: reqwest::RequestBuilder,
     cancellation: &CancellationToken,
@@ -639,7 +707,7 @@ async fn begin_full_response(
     response: &Response,
     progress: &watch::Sender<RuntimeDownloadProgress>,
 ) -> Result<(), RuntimeDownloadError> {
-    if response.url() != url {
+    if !response_url_matches_archive(archive, url, response.url()) {
         return Err(RuntimeDownloadError::InvalidResponse);
     }
     if parse_header_u64(response, &CONTENT_LENGTH)?
@@ -722,7 +790,7 @@ fn response_matches_partial(
         || metadata.expected_sha256 != archive.sha256
         || metadata.target != archive.target
         || metadata.filename != archive.filename
-        || response.url() != url
+        || !response_url_matches_archive(archive, url, response.url())
     {
         return Ok(false);
     }
